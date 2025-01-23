@@ -1,0 +1,343 @@
+---
+title: "Splicing_TPM_analysis"
+output: html_notebook
+date: "06/30/2021"
+
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_knit$set(root.dir = "/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/")
+knitr::opts_chunk$set(echo = TRUE)
+
+getwd()
+```
+
+Load the TPM matrix, and go splitting between conditions to fin different transcript usage
+
+
+####TPMs
+```{r begin}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+path<-"/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Abundance/"
+files <- list.files(path=path,pattern = "TPM_isoform_matrix*")
+
+
+results2 <- sapply(paste0(path,files), function(x) mget(load(x)), simplify = TRUE) 
+head(results2[[1]])
+```
+```{r }
+
+##convert list of data frames to one data frame
+df4<-dplyr::bind_cols(results2)
+####Exploration of the data
+
+## proportion of missing values
+sum(is.na(df4))/(nrow(df4)*ncol(df4)) # 0% of missing values
+
+```
+##Count Zeros
+
+```{r}
+
+##count zeros
+num.zeros<-rowSums(df4==0,na.rm=T)
+
+###
+
+hist(num.zeros)
+```
+```{r}
+###let's apply same reasoning argument as NAs
+num.zeros.r<-rowSums(df4==0,na.rm=T)
+##remove those rows with more than 80% samples
+
+threshold.r<-round(dim(df4)[2]*0.8)
+
+rows2rem<-names(num.zeros.r)[num.zeros.r>threshold.r]
+length(rows2rem)
+df.clean<-df4[!(rownames(df4) %in% rows2rem),]
+##look for zero variance rows
+
+my.var.rows<-which(apply(df.clean, 1, var)==0)
+df.clean<-df.clean[!(rownames(df.clean) %in% my.var.rows), ]
+####save it and try to use SUPPA withe it 
+df2write<-df.clean
+df2write$ID<-rownames(df2write)
+df2write<-df2write[,c(1094,1:1093)]
+head(df2write)
+colnames(df2write)[1]<-""
+
+write.table(df2write,file="/home/tonig/Splicing/TPM_filtered_all_data.tpm",sep="\t",quote=F,row.names = F)
+rm(df2write)
+gc()
+
+```
+Nearly 78000 transcripts are not expressing in more than 80% of samples
+117004 final transcripts
+ python3.7 ~/soft/SUPPA-2.3/suppa.py psiPerIsoform -g ~/Genomes/Homo_sapiens.GRCh37.75.gtf -e ~/media/Projects/Splicing_Calcs/IMID/$describer3.tpm -o IMID/$describer3
+###TPM's PCA
+```{r}
+pca2 <- FactoMineR::PCA(t(df.clean), scale.unit = T, graph = F, ncp = 20)
+
+pheno<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Annotation_RNAseq_Table.rds")
+####same order as splicing matrix
+pheno<-pheno[pheno$celgIdAll %in% colnames(df.clean),]
+pheno<-pheno[match(colnames(df.clean),pheno$celgIdAll),]
+
+##scale!
+
+
+# Scree plot per veure variança de cada component
+factoextra::fviz_eig(pca2)
+```
+```{r}
+
+factoextra::fviz_pca_ind(pca2, axes = c(1,2), habillage=as.factor(pheno$imid),geom="point")+ coord_fixed()
+
+
+```
+##Corr with Gene Expression PC
+```{r}
+###Gene expression components
+
+gene.exprs<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/03_DerivedFeatures/Principal_Components/Results/Classic_PCs.rds")
+  
+####get components of PSI
+pcs.tpm <- data.frame(pca2$ind$coord)
+# Compute correlation matrix
+gene.exprs<-gene.exprs[rownames(gene.exprs) %in% rownames(pcs.tpm),]
+gene.exprs<-gene.exprs[match(rownames(pcs.tpm),rownames(gene.exprs)),]
+
+cor.df <- cor(pcs.tpm[,1:10], gene.exprs[,1:10], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```
+
+##outliers
+```{r}
+outs.class<-apply(data.frame(pca2$ind$coord)[,c(1,2)], 2, function(x) which( (abs(x - median(x)) / mad(x)) > 4 )) %>%
+  Reduce(union, .)
+
+outliers<-rownames(data.frame(pca2$ind$coord)[,c(1,2)])[outs.class]
+##1
+
+pheno$out<-ifelse(rownames(pheno) %in% outliers,"YES","NO")
+#plot
+factoextra::fviz_pca_ind(pca2, axes = c(1,2), habillage=as.factor(pheno$out),geom="point")
+
+```
+
+###Correlations Sex,age and batch
+
+```{r Corrs}
+factoextra::fviz_pca_ind(pca2, axes = c(1,2), habillage=as.factor(pheno$Sex),geom="point")##no effect
+```
+```{r}
+
+factoextra::fviz_pca_ind(pca2, axes = c(1,2), habillage=as.factor(pheno$batch),geom="point")##no batch effect
+pheno$age_cut <- as.numeric(cut(pheno$age, breaks=10))
+```
+```{r}
+# Create variable for age plotting
+factoextra::fviz_pca_ind(pca2, axes = c(1,2), habillage=as.factor(pheno$age_cut),geom="point")##no effect
+
+
+```
+###Correlation with other variables
+###numerical
+```{r}
+
+###find which dimension is more associated with sex and age
+####get components of PSI
+pcs.tpm <- data.frame(pca2$ind$coord)
+raw.sampletable<-read.csv("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Final_Table_GSL.ID.csv")
+raw.sampletable<-raw.sampletable[match(rownames(pcs.tpm),raw.sampletable$X),]
+
+#(batch, RIN, depth, plate) i vs biològiques (IMID, sexe, edat, activitat). 
+
+cor.df2 <- cor(pcs.tpm[,1:10], raw.sampletable[,c("age","rna.RIN","Fragment.Size","KAPA.nM.","Reads")], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df2, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```
+```{r}
+####put here categorical metric to test with
+##https://stats.stackexchange.com/questions/119835/correlation-between-a-nominal-iv-and-a-continuous-dv-variable/124618#124618
+####numeric nominal
+###Boxplot
+
+library(ggpubr)
+library(gridExtra)
+
+metric<-c("Sex","batch","imid")
+
+###build a matrix with n rwos, Dimensions, and 4 columns, metrics
+
+my.cors<-matrix(nrow = 10,ncol = 3)
+my.ps<-matrix(nrow = 10,ncol = 3)
+
+for( j in 1:10){ print(j)
+  
+  for( i in 1:length(metric)){ 
+  
+  numer<-pcs.tpm[,j]
+  nomin<-pheno[,metric[i]]
+  
+  ##coefficient of determination
+  r_squared <- summary(lm(numer ~ nomin))$r.squared
+  pval<-broom::glance(summary(lm(numer ~ nomin)))$p.value
+  ##multiple correlation coefficent
+  assoc<-sqrt(r_squared)
+  
+  ###put it on matrix
+  my.cors[j,i]<-assoc
+  my.ps[j,i]<-pval
+  
+  ####
+  
+  
+  }
+
+}
+
+rownames(my.cors)<-c("Dim.1","Dim.2","Dim.3","Dim.4","Dim.5","Dim.6","Dim.7","Dim.8","Dim.9","Dim.10")
+colnames(my.cors)<-c("Sex","batch","RESP")
+
+
+corrplot::corrplot(my.cors, method = "number", tl.cex = 0.7, number.cex = 0.7)
+
+
+
+```
+
+```{r}
+###find which dimension is more associated with sex and age
+
+cells<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/03_DerivedFeatures/Cell-Estimates/cell_proportions.rds")
+cells<-cells[match(rownames(pcs.tpm),rownames(cells)),]
+main_cells <- c("Granulocytes", "B cells (CD19+)", "CD4+ T cells", "CD8+ T cells", "Monocytes (CD14+)", "NK cells (CD3- CD56+)")
+
+
+cor.df2 <- cor(pcs.tpm[,1:10], cells[,colnames(cells) %in% main_cells], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df2, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```
+Store the matrix without outliers and non expressed transcripts
+```{r}
+df.clean<-df.clean[,colnames(df.clean) %in% rownames(pheno[pheno$out=="NO",])]
+save(df.clean, file="/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Abundance/TPM_clean_transcp_outliers.RData")
+
+```
+
+##Differential transcript usage analysis workflow
+
+```{r}
+library(DRIMSeq)
+
+##counts must be in feature, aka transcripts, and gene order
+
+library(EnsDb.Hsapiens.v75)
+
+
+edb <- EnsDb.Hsapiens.v75
+## Get start/end coordinates of all genes.
+genes <- genes(edb)
+genes<-as.data.frame(genes)
+tx<-transcripts(edb)
+tx<-as.data.frame(tx)
+
+
+###subset per imid
+my.imid<-"SLE"
+my.sel<-c("CTRL",my.imid)
+
+df.pheno<-pheno[pheno$imid %in% my.sel,]
+df.pheno$imid<-droplevels(df.pheno$imid)
+###add pheno info
+
+samples_df <- data.frame(sample_id = df.pheno$celgIdAll,
+group = df.pheno$imid,gender=df.pheno$Sex,batch=df.pheno$batch,age=df.pheno$age)
+
+###add cells
+
+
+cells<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/03_DerivedFeatures/Cell-Estimates/cell_proportions.rds")
+cells<-cells[match(rownames(pcs.tpm),rownames(cells)),]
+main_cells <- c("Granulocytes", "B cells (CD19+)", "CD4+ T cells", "CD8+ T cells", "Monocytes (CD14+)", "NK cells (CD3- CD56+)")
+
+cells$sample_id<-rownames(cells)
+samples_df<-merge(samples_df,cells[,c("Granulocytes","sample_id")],by="sample_id")
+
+cts<-df.clean[,colnames(df.clean) %in% samples_df$sample_id]
+
+samples_df<-samples_df[samples_df$sample_id %in% colnames(cts),]
+cts<-merge(cts,tx[,c("gene_id","tx_name")],by="row.names")
+cts<-cts[,-1]
+colnames(cts)[304]<-"feature_id"
+
+d <- dmDSdata(counts = cts, samples = samples_df)
+###estimate plot
+plotData(d)
+
+```
+#Filtering
+Genes may have many transcripts that are lowly expressed or not expressed at all. You can
+remove them using the dmFilter function. Filtering of lowly expressed transcripts can be
+done at two levels: minimal expression using min_samps_feature_expr and min_feature_expr
+parameters or minimal proportion with min_samps_feature_prop and min_feature_prop.
+It is important to consider what types of transcripts may be removed by the filters, and potentially adjust depending on the dataset. If n was large, it would make sense to allow perhaps a few samples to have very low counts, so lowering min_samps_gene_expr to some factor multiple (<1) of n, and likewise for the first two filters for n.small. The second filter means that if a transcript does not make up more than 10% of the gene’s expression for at least n.small samples, it will be removed. If this proportion seems too high, for example, if very lowly expressed isoforms are of particular interest, then the filter can be omitted or the min_feature_prop lowered. For a concrete example, if a transcript goes from a proportion of 0% in the control group to a proportion of 9% in the treatment group, this would be removed by the above 10% filter. 
+
+```{r}
+# Check what is the minimal number of replicates per condition
+
+
+n <- nrow(samples(d))
+n.small<-min(table(samples(d)$group))
+
+d2<-dmFilter(d,
+        min_samps_feature_expr = n.small, min_feature_expr = 2,##10 is default
+        min_samps_feature_prop = n.small, min_feature_prop = 0.05,##10% is default
+        min_samps_gene_expr = n, min_gene_expr = 2)###10 is default
+
+plotData(d2)
+
+```
+##use DEXseq
+
+```{r}
+library(DEXSeq)
+library(BiocParallel)
+#In order to account for such effects, one should rather use a regression approach, which currently is not supported by DRIMSeq, but can be applied within DEXSeq’s GLM framework.
+design_full <- model.matrix(~ group+as.factor(gender)+as.factor(batch)+age, data = samples(d2))
+
+countData<-round(as.matrix(counts(d2)[,-c(1:2)]))###remove gene and transcript id
+
+dxd<-DEXSeqDataSet(countData = countData, sampleData = samples(d2), 
+design = ~sample + exon + group:exon, featureID = counts(d2)$feature_id, groupID = counts(d2)$gene_id)
+
+
+formulaFullModel    <-  ~ sample + exon + batch:exon+ age:exon + Granulocytes:exon+ gender:exon+group:exon
+formulaReducedModel <-  ~ sample + exon + batch:exon + batch:exon+ age:exon  + Granulocytes:exon+gender:exon
+
+dxd<-estimateSizeFactors(dxd)
+dxd<-estimateDispersions(dxd,BPPARAM = MulticoreParam(workers = 20))
+#dxd<-estimateDispersions(dxd,formula = formulaFullModel,BPPARAM = MulticoreParam(workers = 20))
+
+dxd<-testForDEU(dxd, reducedModel = ~sample + exon)
+dxd<-testForDEU( dxd,reducedModel = formulaReducedModel, fullModel = formulaFullModel,BPPARAM = MulticoreParam(workers = 20) )
+dxr<-DEXSeqResults(dxd, independentFiltering = FALSE)
+head(dxr)
+
+qval<-perGeneQValue(dxr)
+dxr.g<-data.frame(gene = names(qval), qval)
+dxr.t<-as.data.frame(dxr[, c("featureID","groupID","pvalue")])
+```
+To inspect the behavior of precision estimates, you can plot them against the mean gene
+expression. Normally in the differential analysis based on RNA-seq data, such plot has
+dispersion parameter plotted on the y-axis. Here, the y-axis represents precision since in
+the Dirichlet-multinomial model this is the parameter that is directly estimated. It is important to keep in mind that the precision parameter is inverse proportional to dispersion:
+dispersion = 1/(1 + precision). In RNA-seq data, we can typically observe a trend where
+the dispersion decreases (precision increases) for genes with higher mean expression.
+
+```{r}
+```
+
