@@ -1,0 +1,367 @@
+---
+title: "DTE_DGE_comp"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Get the QC for DTE comparing with DGE using PS classes
+## R Markdown
+
+```{r}
+###get DEG and DTE and check if they are enriched
+PSClass<-readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/DerivedFeatures/Clusters/HiLoVarianceRatio_OnlyHigh/Results/Class_PS_SABC.rds")
+
+files<-list.dirs('/home/proteome/bioinformatics/Data/Storage/Molecular/GeneSplicing/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Abundance/Kallisto_Transcriptome_P4',recursive=F)
+names(files)<-gsub("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneSplicing/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Abundance/Kallisto_Transcriptome_P4/","",files)
+names(files)<-gsub("_","-",names(files))
+summarydata<-data.frame(path=files,sample=names(files))
+
+
+###add extra info
+
+pheno<-read.csv("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Old/Final_Table_GSL.ID.csv")
+pheno$sample<-pheno$GSL.ID
+
+####same order as splicing matrix
+summarydata<-merge(summarydata,pheno[,c("sample","sex","age","activity","new.plate","celgIdAll","imid")],by="sample")
+summarydata$batch<-as.factor(paste0("B",summarydata$new.plate))
+##get cells
+cells<-readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/DerivedFeatures/Quantitative/Cell_Estimates/cell_proportions.rds")
+cells$celgIdAll<-rownames(cells)
+
+main_cells <- c("Granulocytes", "B cells (CD19+)", "CD4+ T cells", "CD8+ T cells", "Monocytes (CD14+)", "NK cells (CD3- CD56+)")
+
+summarydata<-merge(summarydata,cells[,c(main_cells,"celgIdAll")],by="celgIdAll")
+summarydata$sex<-as.factor(summarydata$sex)
+##change colnames
+colnames(summarydata)[10:15]<-c("Granulocytes", "Bcells", "CD4", "CD8", "Monocytes", "NKcells")
+colnames(PSClass)[1]<-"celgIdAll"
+summarydata<-merge(summarydata,PSClass,by="celgIdAll")
+
+
+
+##get genes to transcripts
+
+
+t2g <- grch37 %>% 
+  dplyr::select(symbol, ensgene) %>% 
+  dplyr::inner_join(grch37_tx2gene) %>% 
+  dplyr::rename(target_id = enstxp, 
+                ens_gene = ensgene, 
+                ext_gene = symbol)
+
+##establish design
+
+design <- ~ sex + age + batch + Granulocytes +Bcells +CD4 + CD8 +Monocytes + NKcells + cluster
+
+```
+Kallisto analysis
+```{r}
+
+    summarydf<-summarydata
+    summarydf$path<-as.character(summarydf$path)
+
+
+#Import data
+#Main point is we have to use sleuth_prep outside Rstudio GUI, otherwise we cannot use parallelization and hence, the loading is very slow
+# Create sleuth object for analysis 
+
+    so <- sleuth_prep(summarydf, 
+                   full_model = design, 
+                   read_bootstrap_tpm = F,
+                   extra_bootstrap_summary = F,
+                   num_cores=10,##num_cores
+                   transformation_function = function(x) log2(x + 0.5))  	
+    
+    
+    
+    #full model
+    so <- sleuth_fit(so, ~sex + age+batch+ Granulocytes +Bcells +CD4 + CD8 +Monocytes + NKcells +cluster, 'full')
+
+    ##only covs
+    so <- sleuth_fit(so, ~sex + age+ Granulocytes +Bcells +CD4 + CD8 +Monocytes + NKcells +batch, 'cluster')
+
+
+  ##Results
+
+    so.res <- sleuth_lrt(so, 'cluster', 'full')#test here
+    so.betas <- sleuth_wt(so, 'cluster2', 'full')##betas here
+   # Sleuth will transform elements in the condition field to 0s and 1s in alphabetical order 
+    ##hence CTRL beta values will be relative to the 1 condition for SLE, RA, UC, PS and PSA, except in  CD, wich will be 0
+    full_results <- sleuth_results(so.res, 'cluster:full', 'lrt', show_all = FALSE)
+    full_betas <- sleuth_results(so.betas, 'cluster2', 'cluster1', show_all = FALSE)
+    
+    full_results<-merge(full_results,t2g,by="target_id")
+    full_results<-merge(full_results,full_betas[,c("target_id","b")],by="target_id")
+    
+  
+    sleuth_significant <- dplyr::filter(full_results, qval <= 0.05)##activity nothing, hence nominal
+
+       saveRDS(full_results,file="/home/tonig/PS_DTE_Stats/PS_SABC_DTE.rds")
+
+```
+
+
+```{r}
+
+library(fgsea)
+
+deg<-readRDS("/home/tonig/PS_DTE_Stats/PS_unescaled_HI_Diffexp.RDS")
+deg<-deg[deg$FDR<0.05,]
+
+####ad rank using FDR
+
+
+rank.deg<-deg$logFC
+names(rank.deg)<-rownames(deg)
+rank.deg<-rank.deg[order(rank.deg,decreasing = T)]
+####get dte to test
+
+dte<-readRDS("/home/tonig/PS_DTE_Stats/PS_SABC_DTE.rds")
+
+
+dte<-dte[dte$qval<0.05,]
+dte<-dte[order(dte$qval,decreasing = F),]
+genes_dte<-unique(dte$ext_gene)
+my.list<-list(genes_dte)
+length(my.list)
+```
+
+```{r}
+
+names(my.list)<-"DTE_derived_genes"
+
+fgseaRes <- fgsea(pathways = my.list, 
+                  stats    = rank.deg,
+                  eps      = 0.0,
+                  minSize  = 15,
+                  maxSize  = 800)
+
+plotEnrichment(genes_dte,
+               rank.deg) + labs(title="DTE PS SABC class enriched in DEG pval<2.2e-16")
+
+
+```
+```{r}
+
+###DE stats
+
+##How many genes are we gaining?
+##How man genes are we losing?
+##Are we gaining statistical power?
+
+##gain
+
+overlap<-length(rownames(deg[rownames(deg) %in% genes_dte, ]))/dim(deg)[1]##43%
+loss<-deg[!(rownames(deg) %in% genes_dte), ]
+gain<-dte[!(dte$ext_gene %in% rownames(deg)), ]
+gain_genes<-unique(gain$ext_gene)
+loss_genes<-unique(rownames(loss))
+
+
+genesid<-rownames(deg)
+
+genesid<-genesid[ genesid != "" ]##remove empty elements from a vector
+genesid <- genesid[!is.na(genesid)]
+
+eg<-bitr(genesid, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+
+ego2 <- enrichGO(gene         = eg$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.1,
+                 qvalueCutoff  = .05,
+                 readable=T
+)
+
+enrich.dge<-ego2
+
+dotplot(enrich.dge, title="PS SABC Classes DEG",showCategory=30)
+
+
+
+##One idea will be to get the pathways and do same analysis as we did in QC for HSIA for RiboZERo, se
+##how many of them overlap in the rank of original 
+
+```
+```{r}
+genesid<-unique(dte$ext_gene)
+
+genesid<-genesid[ genesid != "" ]##remove empty elements from a vector
+genesid <- genesid[!is.na(genesid)]
+
+eg<-bitr(genesid, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+
+ego2 <- enrichGO(gene         = eg$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.1,
+                 qvalueCutoff  = .1,
+                 readable=T
+)
+
+enrich.dte<-ego2
+
+dotplot(enrich.dte, title="PS SABC Classes DTE",showCategory=30)
+
+```
+```{r}
+genesid<-unique(gain_genes)
+
+genesid<-genesid[ genesid != "" ]##remove empty elements from a vector
+genesid <- genesid[!is.na(genesid)]
+
+eg<-bitr(genesid, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+
+ego2 <- enrichGO(gene         = eg$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.1,
+                 qvalueCutoff  = .1,
+                 readable=T
+)
+
+enrich.gain<-ego2
+
+dotplot(enrich.gain, title="PS SABC Classes Gain Genes",showCategory=30)
+
+```
+```{r,echo=TRUE, fig.keep='all'}
+
+
+###about the statistical power, get transcript per each gene, the one with more adjusted pval, and plot corr
+##rank in dge ordered
+deg$rank_deg<-seq.int(nrow(deg))
+deg$ext_gene<-rownames(deg)
+dte<-dte[order(dte$qval),]
+dte$rank_dte<-seq.int(nrow(dte))
+
+##get first 10 DEG
+
+first.10<-rownames(deg[1:10,])
+dte[dte$ext_gene %in% first.10,]
+
+ranks.res<-merge(dte[,c("ext_gene","b","qval","rank_dte")],deg[,c("ext_gene","logFC","FDR","rank_deg")],by="ext_gene")
+
+ranks.res<-ranks.res[order(ranks.res$rank_deg),]
+```
+
+```{r}
+
+####Rank enrichment test
+
+
+rank.dge<- -log10(enrich.dge$qvalue)
+names(rank.dge)<-enrich.dge$ID
+
+
+###Distribution of ranks ovals
+df.rankdeg<-data.frame(rank.dge)
+df.rankdeg <- df.rankdeg %>%
+  mutate(color_name=case_when(rank.dge>3              ~ "red",
+                              rank.dge>=2 & rank.dge <=3 ~ "blue",
+                              rank.dge <2                  ~ "cyan")) 
+
+
+p<-ggplot(df.rankdeg,aes(x=rank.dge, fill=color_name)) +
+  geom_histogram(binwidth = 1, boundary = 0, position="dodge") +
+  stat_bin(aes(y=..count.., label=ifelse(..count..==0,"",..count..)), geom="text", vjust=-5)+
+  scale_fill_identity(guide = "legend")
+p
+
+###get bins
+x1 <- data.frame(ggplot_build(p)$data[[1]])
+#In the resulting data frame, the xmin and xmax variables show the spans on each bin. you can use x1$xmin[1] and all x1$xmax values to see the start, break points, and end point of the bins.
+####three 
+my.bins<-x1[x1$density !=0,]
+```
+```{r}
+##cut based on prev
+library(plyranges)
+
+df<-as.data.frame(rank.dge)
+df$GOID<-rownames(df)
+colnames(df)[1]<-"Rank"
+df$rank_grp <- df$Rank
+
+####ranks based on my.bins, use as label, interval
+#my.bins<-my.bins[,5:6]
+#my.bins$Label<-paste0(round(my.bins$xmin,digits = 2),"_",round(my.bins$xmax,digits = 2))
+
+
+df$rank_grp <- ifelse((df$Rank>=15 & df$Rank<=20) , '15_20',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=10 & df$Rank<=15) , '10_15',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=5 & df$Rank<=10) , '5_10',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=2 & df$Rank<=5) , '2_5',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=1 & df$Rank<=2) , '1_2',df$rank_grp)
+
+
+###now see how many of overlap_paths are in each group
+####get dte_paths
+
+
+overlap.paths<-names(rank.dge)[names(rank.dge) %in% enrich.dte$ID]
+
+
+df$Overl<-ifelse(df$GOID %in% overlap.paths,"Y","N")
+
+df2<-df %>% dplyr::count(rank_grp, Overl, sort = TRUE) 
+
+
+
+
+library(dplyr)
+#expected results
+
+#for (i in 1:length(my.bins$Label)){
+ 
+ #   df2$group[which(dplyr::between(df2$rank_grp, my.bins$xmin[i], my.bins$xmax[i]))]<-levels(factor(my.bins$Label[i]))
+#}
+#df2
+
+df2$rank_grp <- factor(df2$rank_grp,levels = c("15_20", "10_15", "5_10","2_5","1_2"))
+
+df2$Overl <- factor(df2$Overl,levels = c("Y", "N"))
+
+df2<-df2[order(df2$rank_grp),]
+df2 <- df2 %>% group_by(rank_grp) %>% mutate(PERCENTAGE=n/sum(n))
+df2$PERCENTAGE<-round(df2$PERCENTAGE,digits=2)*100
+
+df2<-df2[!(is.na(df2$rank_grp)),]
+
+p<-ggplot(data=subset(df2,PERCENTAGE != 0), aes(fill=Overl, y=PERCENTAGE, x=rank_grp,order=Overl)) + 
+  geom_bar(stat="identity") +
+ # ggtitle("Global analysis") +
+#  facet_wrap(~Test) +
+ # theme_ipsum() +
+ # theme(legend.position="none") +
+  scale_fill_brewer(palette="Set2")+
+  geom_text(aes(label=paste(PERCENTAGE, "%")), 
+            color="white", size=3,position = position_stack(vjust = 0.5),
+            fontface = "bold")+
+  #geom_col(position = position_dodge2(width = 0.9, preserve = "single")) +
+  #geom_text(position = position_dodge2(width = 0.9, preserve = "single"), angle = 90, vjust=0.25)+
+  xlab("")+
+  ylab("")+
+  rotate_x_text(angle = 45)
+  
+#p+theme_classic()+rotate_x_text(angle = 45)
+
+p
+
+
+phyper(2, 2, 1192-2, 300, lower.tail = FALSE, log.p = FALSE)## top 4.783-14
+phyper(21, 71, 1192-71, 300, lower.tail = FALSE, log.p = FALSE)## top 4.783-14
+
+```

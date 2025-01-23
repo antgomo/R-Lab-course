@@ -1,0 +1,239 @@
+---
+title: "Diff PSI"
+author: "ToniG"
+output: html_notebook
+date: "19/07/2021"
+
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Load Filtered PSI matrix
+```{r begin}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(limma)
+library(readxl)
+library(writexl)
+setwd("/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/02_PSI/")
+
+load("/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/02_PSI/Imputed_PSI_Matrix.RData")
+
+```
+#Load Pheno info
+
+```{r }
+pheno<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Annotation_RNAseq_Table.rds")
+####same order as splicing matrix
+pheno<-pheno[pheno$celgIdAll %in% colnames(imputed.df),]
+pheno<-pheno[match(colnames(imputed.df),pheno$celgIdAll),]
+```
+
+#Subset for IMID and CTRL
+```{r }
+my.imid<-"SLE"
+my.sel<-c("CTRL",my.imid)
+
+df.pheno<-pheno[pheno$imid %in% my.sel,]
+df.pheno$imid<-droplevels(df.pheno$imid)
+###add pheno info
+
+samples_df <- data.frame(sample_id = df.pheno$celgIdAll,
+group = df.pheno$imid,gender=df.pheno$Sex,batch=df.pheno$batch,age=df.pheno$age)
+
+###add cells
+
+cells<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/DerivedFeatures/Cell_Estimates/cell_proportions.rds")
+cells<-cells[match(colnames(imputed.df),rownames(cells)),]
+main_cells <- c("Granulocytes", "B cells (CD19+)", "CD4+ T cells", "CD8+ T cells", "Monocytes (CD14+)", "NK cells (CD3- CD56+)")
+
+cells$sample_id<-rownames(cells)
+samples_df<-merge(samples_df,cells[,c("Granulocytes","sample_id")],by="sample_id")
+
+cts<-imputed.df[,colnames(imputed.df) %in% samples_df$sample_id]
+cts<-cts[,match(samples_df$sample_id,colnames(cts))]
+```
+##Exploratory PCA
+
+```{r}
+pca.res <- FactoMineR::PCA(t(cts), scale.unit = F, graph = F, ncp = 20)###no scale
+
+# Scree plot
+#factoextra::fviz_eig(pca.res)
+
+###store components
+pcs.psi <- data.frame(pca.res$ind$coord)
+factoextra::fviz_pca_ind(pca.res, axes = c(1,2), habillage=as.factor(samples_df$group),geom="point")+ coord_fixed()
+
+
+```
+
+
+###Begin analysis with limma
+```{r}
+group<-as.factor(samples_df$group)
+
+design <- model.matrix(~group+as.factor(samples_df$gender)+as.factor(samples_df$batch)+samples_df$age+samples_df$Granulocytes)
+colnames(design)[2]<-"Comp"
+####generate adjusted beta matrix
+fit <- lmFit(cts, design)
+
+fit2 <- eBayes(fit)
+
+results <- topTable(fit2,coef="Comp",num=dim(fit2)[1],sort.by="P",adjust.method = "BH") ####Pval list 1
+
+res<-subset(results,results$adj.P.Val<.05)
+res<-res[order(res$adj.P.Val),]
+```
+Explore results
+
+##Go enrichment
+```{r}
+
+#common<-up[up%in%down]
+
+all<-sapply(strsplit(rownames(res),";"), function(x) return(x[1]))
+
+###sanity check
+genesid<-all[ all != "" ]
+genesid<-unique(genesid)
+
+genesid <- genesid[!is.na(genesid)]
+
+#####GO enrichment analysis
+library(clusterProfiler)
+library(org.Hs.eg.db)
+#library(GOstats)
+library(GO.db)
+library(DOSE)
+library(annotate)
+
+
+eg<-bitr(genesid, fromType="ENSEMBL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+ego2 <- enrichGO(gene         = eg$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.05,
+                 qvalueCutoff  = 0.05,
+                 readable=T
+)
+#png(paste0("/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/02_PSI/GOenrich_",my.imid,".png"),width = 1100,height = 480)
+dotplot(ego2, title=paste0("GO enrichment ",my.imid),showCategory=25,font.size = 8)
+#dev.off()
+```
+
+
+#Fix results
+```{r}
+res$ENSEMBL<-sapply(strsplit(rownames(res),";"), function(x) return(x[1]))
+res$Trans<-sapply(strsplit(rownames(res),";"), function(x) return(x[2]))
+
+eg<-bitr(res$ENSEMBL, fromType="ENSEMBL", toType="SYMBOL", OrgDb="org.Hs.eg.db")
+res<-merge(res,eg,by="ENSEMBL")
+##sort by pval
+head(res[order(res$adj.P.Val),])
+write_xlsx(res[,c(9,1,8,2:7)],paste0("/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/02_PSI/PSI_",my.imid,"_CTRL.xlsx"))
+res.sign.psi<-res
+
+```
+#Expression
+```{r}
+###scatter 
+
+####first get the info from expres
+
+exprs.cts<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Counts/Raw_counts_RNAseq.rds")
+
+###get the samples 2 analyze
+
+cts.exprs<-exprs.cts[,colnames(exprs.cts) %in% samples_df$sample_id]
+cts.exprs<-cts.exprs[,match(samples_df$sample_id,colnames(cts.exprs))]
+#conduct SABC and get pvals
+group<-as.factor(samples_df$group)
+y <- DGEList(cts.exprs,group=group)## 
+
+# filter out very lowly expressed tags, keeping genes that are expressed at a reasonable level in at least
+#one treatment condition. Since the smallest group size is 150, we keep genes that achieve at least
+#one count per million (cpm) in at least three samples:
+
+keep <- rowSums(cpm(y)>1) >= min(table(group))
+y <- y[keep, ]
+
+dim(y)
+
+y$samples$lib.size <- colSums(y$counts)
+y <- calcNormFactors(y, method="TMM")
+
+
+design <- model.matrix(~group+as.factor(samples_df$gender)+as.factor(samples_df$batch)+samples_df$age+samples_df$Granulocytes)
+colnames(design)[2]<-"Comp"
+###add design to the object
+y2 <- estimateDisp(y, design, robust=TRUE)
+#Now estimate gene-specific dispersions:
+
+plotBCV(y2)
+
+####radical solution
+fit <- glmQLFit(y2, design)
+res <- glmQLFTest(fit, coef="Comp")##or  contrast=B.LvsP
+
+results.exprs<-topTags(res,n= dim(res$table)[1],adjust.method="BH", sort.by="PValue")
+results.exprs<-results.exprs$table
+
+
+```
+
+```{r}
+exprs.cts<-cpm(y,log=T, prior.count = 2)
+pca.res <- FactoMineR::PCA(t(exprs.cts), scale.unit = F, graph = F, ncp = 20)###no scale
+
+# Scree plot
+#factoextra::fviz_pca_ind(pca.res, axes = c(1,2), habillage=as.factor(samples_df$group),geom="point")+ coord_fixed()
+
+pcs.exprs <- data.frame(pca.res$ind$coord)
+pcs.exprs<-pcs.exprs[match(rownames(pcs.psi),rownames(pcs.exprs)),]
+```
+```{r}
+# Compute correlation matrix
+cor.df <- cor(pcs.psi[,1:10], pcs.exprs[,1:10], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```
+##Scatter using same numb of transcripts
+```{r}
+
+###select in expression only those ones that appear in signif PSI results
+
+res.expres.cor<-results.exprs[rownames(results.exprs) %in% res.sign.psi$SYMBOL, ]
+res.expres1<-res.expres.cor
+res.expres1$SYMBOL<-rownames(res.expres1)
+
+res.expres1<-res.expres1[,c("SYMBOL","FDR")]
+
+```
+```{r}
+
+##select the most significative transcript and merge
+
+library(dplyr)
+library(tidyr)
+library(data.table)
+
+data<-res.sign.psi[,c("SYMBOL","adj.P.Val")]
+
+
+data<-setDT(data)[ , .SD[which.min(adj.P.Val)], by = SYMBOL]   # Min adj Pval per gene
+vals2plot<-merge(data,res.expres1,by="SYMBOL")
+
+ggplot(vals2plot, aes(x=-log10(adj.P.Val), y=-log10(FDR))) + geom_point()+ggtitle("Selecting most significant Transcript per gene")
+dim(vals2plot[vals2plot$adj.P.Val<.05 & vals2plot$FDR>0.05, ])
+
+```
+Gain 2064/5444 more genes because Transcript info
+

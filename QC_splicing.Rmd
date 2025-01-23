@@ -1,0 +1,366 @@
+---
+title: "Splicing_QC"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_knit$set(root.dir = "/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/")
+knitr::opts_chunk$set(echo = TRUE)
+
+getwd()
+```
+
+#Load TPMs and PSI matrix before calculations to do QC sanity check
+```{r begin}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+path<-"/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/02_PSI/"
+files <- list.files(path=path,pattern = "*.RData")
+
+results <- sapply(paste0(path,files), function(x) mget(load(x)), simplify = TRUE) 
+head(results[[1]])
+```
+#Removing NAs
+
+```{r }
+#NAs are not just when TPM = 0. If the numerator TPM is zero, but the gene
+#is expressed (other transcripts have TPM >0),
+#PSI = 0 is a meaningful value.
+
+#NAs mean that there is not sufficient expression in any of the transcripts
+#in that gene to estimate the relative inclusion of the events.
+#It could happen because of the low sequencing depth or because the genes
+#are not expressed.
+
+#The question is whether downstream methods can handle NAs or not. The
+#methods used in SUPPA can handle some NAs and you can control what
+#proportion you accept. If the method you want to use cannot handle NAs, you
+#can either eliminate those rows or use imputation to give an estimated
+#value. Imputation could be done in rows with a limited number of NAs, and
+#following the distribution of the existing values across rows and columns.
+##convert list of data frames to one data frame
+df3<-dplyr::bind_cols(results)
+####Exploration of the data
+
+## proportion of missing values
+sum(is.na(df3))/(nrow(df3)*ncol(df3)) # 19.77% of missing values initially. 0.65 % after removing
+
+df3  %>%
+  summarise_all(list(~is.na(.)))%>%
+  pivot_longer(everything(),
+               names_to = "variables", values_to="missing") %>%
+  dplyr::count(variables, missing) %>%
+  ggplot(aes(y=variables,x=n,fill=missing))+
+  geom_col()+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+```
+```{r }
+###count number of NAs per row and columns
+nasprow<-apply(df3, 1, function(x) sum(is.na(x)))
+nasprcol<-apply(df3, 2, function(x) sum(is.na(x)))
+#NA: PSI = if the expression is 0 for all the transcripts involved in the event or if the event does not pass any #the transcript expression filter (see PSI calculation, Command and options). 
+#Also if one or more transcripts of #the event do not appear in the expression file, an NA will be returned (only for event)
+
+hist(nasprcol)
+
+##remove those rows with more than 20% of NaNs 
+
+threshold.r<-round(dim(df3)[2]*0.2)#45476
+##emove samples with more than 30% of NaNs
+threshold.c<-round(dim(df3)[1]*0.3)##0
+
+rows2rem<-names(nasprow)[nasprow>threshold.r]#45476
+cols2rem<-names(nasprcol)[nasprcol>threshold.c]
+
+
+df.clean<-df3[!(rownames(df3) %in% rows2rem),!(colnames(df3) %in% cols2rem)]
+
+  ## proportion of missing values
+sum(is.na(df.clean))/(nrow(df.clean)*ncol(df.clean)) #  0.65 % after removing
+
+
+df.clean  %>%
+  summarise_all(list(~is.na(.)))%>%
+  pivot_longer(everything(),
+               names_to = "variables", values_to="missing") %>%
+  dplyr::count(variables, missing) %>%
+  ggplot(aes(y=variables,x=n,fill=missing))+
+  geom_col()+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+##count zeros
+num.zeros<-rowSums(df.clean==0,na.rm=T)
+
+###
+
+hist(num.zeros)
+
+
+```
+###Remove non variant zeros
+```{r}
+###let's apply same reasoning argument as NAs
+num.zeros.r<-rowSums(df.clean==0,na.rm=T)
+num.zeros.c<-colSums(df.clean==0,na.rm=T)
+##remove those rows with more than 20% of NaNs 
+
+threshold.r<-round(dim(df3)[2]*0.2)
+##emove samples with more than 20% of NaNs
+threshold.c<-round(dim(df3)[1]*0.2)
+
+rows2rem<-names(num.zeros.r)[num.zeros.r>threshold.r]
+cols2rem<-names(num.zeros.c)[num.zeros.c>threshold.c]
+
+
+df.clean<-df.clean[!(rownames(df.clean) %in% rows2rem),]
+
+```
+
+###PCA
+```{r PCA}
+#df.clean[is.na(df.clean)] <- 0
+
+
+#The error is because one of the column has constant values.
+
+#Calculate standard deviation of all the numeric cols to find the zero variance variables.
+
+#If the standard deviation is zero, you can remove the variable and compute pca
+
+##look for zero variance rows
+
+my.var.rows<-which(apply(df.clean, 1, var)==0)
+df.clean<-df.clean[!(rownames(df.clean) %in% my.var.rows), ]
+#df.clean[is.na(df.clean)] <- 0
+
+#scaled.df<-scale(df.clean) 
+
+#pca.res <- FactoMineR::PCA(t(scaled.df), scale.unit = F, graph = F, ncp = 20)##scaled by hand, better
+pca.res <- FactoMineR::PCA(t(df.clean), scale.unit = F, graph = F, ncp = 20)###no scale
+##Missing values are imputed by the mean of the variable: you should use the imputePCA function of the missMDA package
+res.imput<-imputePCA(df.clean,ncp=2)
+dim(res.imput$completeObs)
+imputed.df<-res.imput$completeObs
+
+save(imputed.df,file="../../../../../../Storage/Molecular/GeneSplicing/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/02_PSI/Imputed_PSI_Matrix_no_out.RData")
+
+pheno<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Annotation_RNAseq_Table.rds")
+####same order as splicing matrix
+pheno<-pheno[pheno$celgIdAll %in% colnames(df.clean),]
+pheno<-pheno[match(colnames(df.clean),pheno$celgIdAll),]
+
+
+
+# Scree plot per veure variança de cada component
+factoextra::fviz_eig(pca.res)
+```
+```{r PCA2}
+
+factoextra::fviz_pca_ind(pca.res, axes = c(1,2), habillage=as.factor(pheno$imid),geom="point")
+```
+##outliers
+```{r}
+outs.class<-apply(data.frame(pca.res$ind$coord)[,c(1,2)], 2, function(x) which( (abs(x - median(x)) / mad(x)) > 3 )) %>%
+  Reduce(union, .)
+
+outliers<-rownames(data.frame(pca.res$ind$coord)[,c(1,2)])[outs.class]
+##1
+
+pheno$out<-ifelse(rownames(pheno) %in% outliers,"YES","NO")
+#plot
+factoextra::fviz_pca_ind(pca.res, axes = c(1,2), habillage=as.factor(pheno$out),geom="point")
+
+```
+
+##prcomp
+```{r}
+#pca<- prcomp(t(df.clean),center = TRUE, scale. = TRUE)
+#pca$x %>%
+#  as.data.frame %>%
+#ggplot(aes(x=PC1,y=PC2)) + geom_point(size=3) +
+#  theme_bw(base_size=32) + 
+ # labs(x=paste0("PC1: ", percentVar[1], "% variance"),
+ #      y=paste0("PC2: ", percentVar[2], "% variance")) +
+ # theme(legend.position="top")
+```
+
+###Correlations Gene Expression PCs
+
+```{r Corrs}
+
+###Gene expression components
+
+gene.exprs<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/03_DerivedFeatures/Principal_Components/Results/Classic_PCs.rds")
+  
+####get components of PSI
+pcs.psi <- data.frame(pca.res$ind$coord)
+gene.exprs<-gene.exprs[match(rownames(pcs.psi),rownames(gene.exprs)),]
+
+# Compute correlation matrix
+cor.df <- cor(pcs.psi[,1:10], gene.exprs[,1:10], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df, method = "number", tl.cex = 0.7, number.cex = 0.7)
+
+#hist(df.clean[!is.na(df.clean[9000,])])
+```
+###Correlation with other variables
+###numerical
+```{r}
+
+###find which dimension is more associated with sex and age
+
+raw.sampletable<-read.csv("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Final_Table_GSL.ID.csv")
+raw.sampletable<-raw.sampletable[match(rownames(pcs.psi),raw.sampletable$X),]
+
+#(batch, RIN, depth, plate) i vs biològiques (IMID, sexe, edat, activitat). 
+
+cor.df2 <- cor(pcs.psi[,1:10], raw.sampletable[,c("age","rna.RIN","Fragment.Size","KAPA.nM.","Reads")], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df2, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```
+```{r}
+####put here categorical metric to test with
+##https://stats.stackexchange.com/questions/119835/correlation-between-a-nominal-iv-and-a-continuous-dv-variable/124618#124618
+####numeric nominal
+###Boxplot
+
+library(ggpubr)
+library(gridExtra)
+
+metric<-c("Sex","batch","imid")
+
+###build a matrix with n rwos, Dimensions, and 4 columns, metrics
+
+my.cors<-matrix(nrow = 10,ncol = 3)
+my.ps<-matrix(nrow = 10,ncol = 3)
+
+for( j in 1:10){ print(j)
+  
+  for( i in 1:length(metric)){ 
+  
+  numer<-pcs.psi[,j]
+  nomin<-sampleTable[,metric[i]]
+  
+  ##coefficient of determination
+  r_squared <- summary(lm(numer ~ nomin))$r.squared
+  pval<-broom::glance(summary(lm(numer ~ nomin)))$p.value
+  ##multiple correlation coefficent
+  assoc<-sqrt(r_squared)
+  
+  ###put it on matrix
+  my.cors[j,i]<-assoc
+  my.ps[j,i]<-pval
+  
+  ####
+  
+  
+  }
+
+}
+library(corrplot)
+
+rownames(my.cors)<-c("Dim.1","Dim.2","Dim.3","Dim.4","Dim.5","Dim.6","Dim.7","Dim.8","Dim.9","Dim.10")
+colnames(my.cors)<-c("Sex","batch","RESP")
+
+
+corrplot::corrplot(my.cors, method = "number", tl.cex = 0.7, number.cex = 0.7)
+
+
+
+```
+###MDS
+
+```{r}
+# Load required packages
+library(magrittr)
+library(dplyr)
+library(ggpubr)
+# Compute MDS
+mds <- t(df.clean) %>%
+  dist() %>%          
+  cmdscale() %>%
+  as_tibble()
+colnames(mds) <- c("Dim.1", "Dim.2")
+# Plot MDS
+ggscatter(mds, x = "Dim.1", y = "Dim.2",
+          label = colnames(df.clean),
+          size = 1,
+          repel = T)
+
+ggplot(mds, aes(x=Dim.1, y=Dim.2,color=pheno$imid)) + geom_point()
+
+
+```
+```{r}
+
+
+###find which dimension is more associated with sex and age
+
+raw.sampletable<-read.csv("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Final_Table_GSL.ID.csv")
+raw.sampletable<-raw.sampletable[match(rownames(pcs.psi),raw.sampletable$X),]
+
+#(batch, RIN, depth, plate) i vs biològiques (IMID, sexe, edat, activitat). 
+
+cor.df2 <- cor(pcs.psi[,1:10], raw.sampletable[,c("age","rna.RIN","Fragment.Size","KAPA.nM.","Reads")], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df2, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```
+
+
+####TPMs
+```{r }
+
+path<-"/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Abundance/"
+files <- list.files(path=path,pattern = "*.RData")
+
+results2 <- sapply(paste0(path,files), function(x) mget(load(x)), simplify = TRUE) 
+head(results2[[1]])
+```
+```{r }
+
+##convert list of data frames to one data frame
+df4<-dplyr::bind_cols(results2)
+####Exploration of the data
+
+## proportion of missing values
+sum(is.na(df4))/(nrow(df4)*ncol(df4)) # 0% of missing values
+
+```
+###TPM's PCA
+```{r}
+pca2 <- FactoMineR::PCA(t(df4), scale.unit = T, graph = F, ncp = 20)
+
+pheno<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Annotation_RNAseq_Table.rds")
+####same order as splicing matrix
+pheno<-pheno[pheno$celgIdAll %in% colnames(df4),]
+pheno<-pheno[match(colnames(df4),pheno$celgIdAll),]
+
+##scale!
+
+
+# Scree plot per veure variança de cada component
+factoextra::fviz_eig(pca2)
+```
+```{r}
+
+factoextra::fviz_pca_ind(pca2, axes = c(1,2), habillage=as.factor(pheno$imid))
+
+```
+```{r}
+###Gene expression components
+
+gene.exprs<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/03_DerivedFeatures/Principal_Components/Results/Classic_PCs.rds")
+  
+####get components of PSI
+pcs.tpm <- data.frame(pca2$ind$coord)
+# Compute correlation matrix
+gene.exprs<-gene.exprs[rownames(gene.exprs) %in% rownames(pcs.tpm),]
+gene.exprs<-gene.exprs[match(rownames(pcs.tpm),rownames(gene.exprs)),]
+
+cor.df <- cor(pcs.tpm[,1:10], gene.exprs[,1:10], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```

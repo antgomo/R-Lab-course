@@ -1,0 +1,204 @@
+---
+title: "Splicing_DTE_analysis"
+output: html_notebook
+date: "07/16/2021"
+
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_knit$set(root.dir = "/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood_Bulk/2017_IMX_P4RNAseq_NovaSeqK_IA/")
+knitr::opts_chunk$set(echo = TRUE)
+
+getwd()
+```
+
+Load the TPM matrix, and go splitting between conditions to fin different transcript usage
+
+
+####TPMs
+```{r begin}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tximport)
+library(fishpond)
+library(sleuth)
+library(annotables)
+library(tidyverse)
+
+
+
+###first get the files that have run with kallisto
+
+files<-list.dirs('~/Kallisto_Transcriptome_P4',recursive=F)
+names(files)<-gsub("/home/tonig/Kallisto_Transcriptome_P4/","",files)
+names(files)<-gsub("_","-",names(files))
+summarydata<-data.frame(path=files,sample=names(files))
+
+
+###add extra info
+pheno<-read.csv("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Final_Table_GSL.ID.csv")
+pheno$sample<-pheno$GSL.ID
+####same order as splicing matrix
+summarydata<-merge(summarydata,pheno[,c("sample","sex","age","activity","new.plate","celgIdAll","imid")],by="sample")
+summarydata$batch<-as.factor(paste0("B",summarydata$new.plate))
+##get cells
+cells<-readRDS("/home/tonig/media/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/DerivedFeatures/Cell_Estimates/cell_proportions.rds")
+
+cells$celgIdAll<-rownames(cells)
+
+summarydata<-merge(summarydata,cells[,c("Granulocytes","celgIdAll")],by="celgIdAll")
+summarydata$sex<-as.factor(summarydata$sex)
+```
+
+##get genes to transcripts
+
+```{r}
+
+t2g <- grch37 %>% 
+  dplyr::select(symbol, ensgene) %>% 
+  dplyr::inner_join(grch37_tx2gene) %>% 
+  dplyr::rename(target_id = enstxp, 
+         ens_gene = ensgene, 
+         ext_gene = symbol)
+
+##establish design
+design <- ~ sex + age + batch + Granulocytes +imid
+```
+#Select samples
+```{r}
+my.imid<-"SLE"
+my.sel<-c("CTRL",my.imid)
+
+summarydata<-summarydata[summarydata$imid %in% my.sel,]
+summarydata$imid<-as.factor(summarydata$imid)
+```
+
+
+
+#Import data
+Main point is we have to use sleuth_prep outside Rstudio GUI, otherwise we cannot use parallelization and hence, the loading is very slow
+```{r}
+# Create sleuth object for analysis 
+
+so <- sleuth_prep(summarydata, 
+                  full_model = design, 
+                  target_mapping = t2g, 
+                  read_bootstrap_tpm = TRUE,
+                  extra_bootstrap_summary = TRUE,
+                  transformation_function = function(x) log2(x + 0.5))  ##num_cores	
+###only out of RStudio
+```
+#QC
+```{r}
+plot_pca(so, color_by = 'imid')
+
+```
+
+##Fit
+
+```{r}
+#full model
+so <- sleuth_fit(so, ~sex + age+batch+Granulocytes+imid, 'full')
+##only covs
+so <- sleuth_fit(so, ~sex + age+batch+Granulocytes, 'imid')
+
+
+```
+
+##Results
+```{r}
+so <- sleuth_lrt(so, 'imid', 'full')
+full_results <- sleuth_results(so, 'imid:full', 'lrt', show_all = FALSE)
+sleuth_significant <- dplyr::filter(full_results, qval <= 0.05)##activity nothing, hence nominal
+
+
+```
+#heatmap
+```{r}
+
+tabd_df <- so$obs_norm[so$obs_norm$target_id %in% sleuth_significant$target_id, ]
+tabd_df <- dplyr::select(tabd_df, target_id, sample, tpm)
+tabd_df <- reshape2::dcast(tabd_df, target_id ~ sample, value.var = "tpm")
+rownames(tabd_df)<-tabd_df$target_id
+tabd_df<-tabd_df[,-1]
+summarydf<-summarydata[1:22,]
+tabd_df<-tabd_df[,match(summarydf$sample,colnames(tabd_df))]
+colnames(tabd_df)<-summarydf$celgIdAll
+
+annot<-summarydf[,c(1,8)]
+colnames(annot)[1]<-"ID"
+rownames(annot)<-annot$ID
+
+res.m3c <- M3C(tabd_df, cores=7,des=annot,seed = 123, removeplots = F)
+
+# get the data out of the results list (by using $ - dollar sign), use 2 clusters (see RCSI plot)
+data <- res.m3c$realdataresults[[2]]$ordered_data # this is the data
+annon <- res.m3c$realdataresults[[2]]$ordered_annotation # this is the annotation
+ccmatrix <- res.m3c$realdataresults[[2]]$consensus_matrix # this is the consensus matrix
+
+
+# normalise and scale the data
+data <- t(scale(t(data))) # z-score normalise each row (feature)
+data <- apply(data, 2, function(x) ifelse(x > 4, 4, x)) # compress data within range
+data <- apply(data, 2, function(x) ifelse(x < -4, -4, x)) # compress data within range
+
+
+samples<-ifelse(annon$imid=="CTRL","blue1","red")
+
+cons<-ggsci::pal_futurama()(max(levels(annon$consensuscluster)))[as.factor(annon$consensuscluster)]#5 clusters
+
+
+spcol <- rbind(cons, samples)
+
+cols <- colorRampPalette(brewer.pal(10, "RdBu"))(256)
+
+
+heatmap.2x(data, col=rev(cols), Colv = NA,Rowv=TRUE, scale="none", ColSideColors=spcol,
+           trace="none", dendrogram="both", 
+           cexRow=1, cexCol=1.4,
+           main="",
+           labCol=NA,labRow=NA, density.info="none",
+           hclust=function(x) hclust(x,method="complete"),
+           distfun=function(x) as.dist((1-cor(t(x)))/2)
+           
+)
+
+legend("topright",c("CTRL",my.imid[i]),pch=20:20,col=c("blue1","red"))
+
+
+
+
+
+
+p<- plot_transcript_heatmap(so, sleuth_significant$target_id, 'tpm', cluster_transcripts = T)
+```
+```{r}
+#####GO enrichment analysis
+library(clusterProfiler)
+library(org.Hs.eg.db)
+#library(GOstats)
+library(GO.db)
+library(DOSE)
+library(annotate)
+
+genesid<-sleuth_significant$ext_gene
+genesid<-unique(genesid)
+
+genesid <- genesid[!is.na(genesid)]
+
+eg<-bitr(genesid, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+ego2 <- enrichGO(gene         = eg$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.05,
+                 qvalueCutoff  = 0.05,
+                 readable=T
+)
+#png(paste0("/home/tonig/media/Data/Storage/Molecular/GeneSplicing/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/02_PSI/GOenrich_",my.imid,".png"),width = 1100,height = 480)
+dotplot(ego2, title=paste0("GO enrichment ",my.imid),showCategory=25,font.size = 8)
+```
+

@@ -1,0 +1,1947 @@
+
+
+---
+title: "Initial_QC"
+output: html_notebook
+---
+Initial QC of data sequenced at Aug21, Batch1, 94 samples
+The idea is to look at Input reads, Percent alginment, Globin's reduction and PC comparison with latest set, aka P4
+
+```{r setup, include=FALSE}
+#knitr::opts_knit$set(root.dir = /home/proteome/bioinformatics/Data/Scripts/Molecular/GeneExpression/WholeBlood/2021_IMX_002_NovaSeqRZ_IA")
+knitr::opts_chunk$set(echo = TRUE)
+
+getwd()
+```
+
+#Load Samples info
+```{r begin}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+####First, get pheno info of this set
+
+pheno<-readRDS("/home/proteome/bioinformatics/Data/Storage/Clinical/2008_IMIDKIT_IA/03_Preprocessed/clinicalData_v1.rds")
+
+##get shipment info
+
+my.table<-read_xlsx("/home/proteome/RAW_Data/RAW_S3_Bucket_Synchronized/2021_IMX_002_NovaSeqRZ_IA/Dataset_Files/SampleShipments/sApax_20may.2021_v1.xlsx")
+my.table<-my.table[,c("tubeCode","donationId")]
+
+####get correspondence using tubecode and indivID in pheno
+
+table(my.table$donationId %in% pheno$indivId)
+
+##merge, first change name of vaiable to do mergin 
+colnames(my.table)[2]<-"indivId"
+
+pheno<-merge(pheno[,c("indivId","Sex","Age","IMID","LES_F_12")],my.table,by="indivId")
+head(pheno)
+
+###Load info from GSL, sequenced samples
+##now get our samples
+###file sent by GSL to get Library ID and Internal GSL ID
+samples<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/filenames_HHMJ7DSX2.txt",head=T)
+samples<-samples[,c("Library.ID","Library_name")]
+samples<-samples[(!(duplicated(samples$Library_name))),]###duplicated because several Lanes per sample, whenever we select both, no problem to get unique ones
+
+####Samplesheet sent by GSL, we selected the sheet corresponding to the info we nedd
+
+samplesheet<-read.csv("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2021_IMX_002_NovaSeqRZ_IA/Metadata/First_plate_samplesheet.csv")
+colnames(samples)[2]<-"Sample.ID"
+
+###merging samples, info about Library Code and INterna GSL, FASTQs are in Libra ID and then you got the counts with this Code
+samplesheet<-merge(samplesheet,samples, by="Sample.ID")
+samplesheet$tubeCode<-gsub(" ","",samplesheet$tubeCode)###some ones have extra space, probably because changin from xlsx to xls 
+samplesheet<-merge(samplesheet,pheno, by="tubeCode")
+
+table(samplesheet$IMID)
+
+
+```
+#Global QC
+Input reads, % alignment and Globin reduction
+
+
+```{r ,echo=TRUE, fig.keep='all'}
+###Input reads; compare with previous
+###
+
+input.reads<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/BAM/input_reads.txt",head=F)
+
+###plot input reads for all samples
+h <- hist(input.reads$V3, plot=F) # 
+
+
+# plot the histogram with the colours
+pl<-plot(h, col="lightblue",main = "Input Reads Distribution",xlab = "Input Reads" )
+#legend(20, 28, h$mids, lwd=2, col=cols)
+abline(v=mean(input.reads$V3), col="red", lty=c(2,2), lwd=c(3, 3))
+
+
+```
+Seems perfect, we struggled a lot to get at least %0M reads, only 5 samples have low reads but over 40M
+#Alignment percentatge
+```{r ,echo=TRUE, fig.keep='all'}
+
+align<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/BAM/aln_stats.txt",head=F)
+
+###plot scores for all samples
+h <- hist(align$V3, plot=F) # h$breaks and h$mids
+
+
+# plot the histogram with the colours
+pl<-plot(h, col="lightblue",main = "% alignment Distribution",xlab = "% alignment" )
+#legend(20, 28, h$mids, lwd=2, col=cols)
+abline(v=mean(align$V3), col="red", lty=c(2,2), lwd=c(3, 3))
+
+```
+###Globin reads
+```{r}
+##first get_counts from last set, we will call it Aug21
+cts<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/BAM/RNAseq_Counts.txt",head=F)
+rownames(cts)<-cts$V1
+cts<-cts[,-1]
+##col names, samples from the counts
+colnames<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/BAM/order_samples.txt",head=F)
+colnames<-colnames$V1
+
+colnames(cts)<-colnames
+
+#####normalize
+
+cts<-cts[,match(samplesheet$Library.ID,colnames(cts))]
+samplesheet$IMID<-droplevels(samplesheet$IMID)
+
+y <- DGEList(counts=as.matrix(cts))##
+
+
+# not filter,because we want to see Globins
+
+y$samples$lib.size <- colSums(y$counts)
+y <- calcNormFactors(y, method="TMM")
+
+library(EnsDb.Hsapiens.v86)
+# 1. Convert from ensembl.gene to gene.symbol
+
+geneIDs1 <- ensembldb::select(EnsDb.Hsapiens.v86, keys= rownames(y$counts), keytype = "GENEID", columns = c("SYMBOL","GENEID"))
+
+
+###merge
+
+rownames(geneIDs1)<-geneIDs1$GENEID
+cpm_log<-cpm(y,log = T, prior.count = 2)
+
+cts.annot<-merge(cpm_log, geneIDs1,by="row.names")
+######
+
+globins<-c("HBA1","HBA2","^HBB$")
+
+##proportion of matched glbin matched reads
+matches <- grep(paste(c(globins),collapse="|"), cts.annot$SYMBOL)
+globins.cts<-cts.annot[matches,]
+
+globins.round1<-globins.cts[,2:95]
+
+globins.round1<-apply(globins.round1,2,mean)
+
+###load the other set
+cts.set1 <- readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Counts/Raw_counts_RNAseq.rds")
+
+y2 <- DGEList(counts=as.matrix(cts.set1))##
+
+# not filter,because we want to see Globins
+
+y2$samples$lib.size <- colSums(y2$counts)
+y2 <- calcNormFactors(y2, method="TMM")
+
+cpm2<-cpm(y2,log = T, prior.count = 2)
+
+
+matches <- grep(paste(c(globins),collapse="|"), rownames(cpm2))
+globins.round2<-cpm2[matches,]
+globins.round2<-apply(globins.round2,2,mean)
+
+####now, bad set, 2017 one
+
+load("/home/tonig/RNAseq_FASTQ_Aug21/CellGene_RNAseq_Counts_Salmon.RData")
+
+cts <- txi.salmon$counts
+normMat <- txi.salmon$length
+
+# Obtaining per-observation scaling factors for length, adjusted to avoid
+# changing the magnitude of the counts.
+normMat <- normMat/exp(rowMeans(log(normMat)))
+normCts <- cts/normMat
+
+# Computing effective library sizes from scaled counts, to account for
+# composition biases between samples.
+eff.lib <- calcNormFactors(normCts) * colSums(normCts)
+
+# Combining effective library sizes with the length factors, and calculating
+# offsets for a log-link GLM.
+normMat <- sweep(normMat, 2, eff.lib, "*")
+normMat <- log(normMat)
+
+# Creating a DGEList object for use in edgeR.
+y <- DGEList(cts,group=samples$V2)
+y <- scaleOffset(y, normMat)
+
+cpm3<-cpm(y,log = T, prior.count = 2)
+
+
+matches <- grep(paste(c(globins),collapse="|"), rownames(cpm3))
+globins.round3<-cpm3[matches,]
+globins.round3<-apply(globins.round3,2,mean)
+
+####
+
+
+Van der Linde,
+```
+
+###PCA
+Now, compare datasets in terms of components. First , use P4 Aug 18 and then subset according this one
+```{r PCA}
+cts.set1 <- readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Counts/Raw_counts_RNAseq.rds")
+##ensembl
+
+#cts.set1 <- readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Counts/Raw_ENSEMBL_counts.rds")
+
+# Sample table ordered by celgIdAll
+sampleTable <- readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Annotation_RNAseq_Table.rds")
+sampleTable <- sampleTable[sampleTable$Outliers_PCA == "No",]
+
+
+my.cts<-cts.set1[,match(sampleTable$donaId,colnames(cts.set1))]
+
+
+y <- DGEList(counts=as.matrix(my.cts),group=sampleTable$imid)##
+
+keep <- rowSums(cpm(y)>2) >= min(table(y$samples$group))#
+y <- y[keep, ]
+
+dim(y)
+
+y$samples$lib.size <- colSums(y$counts)
+
+y <- calcNormFactors(y, method="TMM")
+
+lCPM <- cpm(y, normalized.lib.sizes = TRUE, log = TRUE, prior.count = 2) 
+#lCPM18 <- removeBatchEffect(lCPM, batch = sampleTable$new.plate, batch2 = sampleTable$sex, covariates = cbind(sampleTable$age))
+lCPM18 <- removeBatchEffect(lCPM, batch = sampleTable$new.plate, batch2 = relevel(sampleTable$sex,ref="MALE"), covariates = cbind(sampleTable$age-mean(sampleTable$age)))
+
+#pca.aug18 <- FactoMineR::PCA(t(lCPM18), scale.unit = T, graph = F, ncp = 20)### scale
+
+```
+```{r PCA21}
+##first get_counts from last set, we will call it Aug21
+cts<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/BAM/RNAseq_Counts.txt",head=F)
+rownames(cts)<-cts$V1
+cts<-cts[,-1]
+##col names, samples from the counts
+colnames<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/BAM/order_samples.txt",head=F)
+colnames<-colnames$V1
+
+colnames(cts)<-colnames
+
+#####normalize
+
+cts<-cts[,match(samplesheet$Library.ID,colnames(cts))]
+samplesheet$IMID<-droplevels(samplesheet$IMID)
+my.samplesheet<-samplesheet[grep("SLE|CTRL",samplesheet$IMID),]
+
+my.cts<-cts[,match( samplesheet$Library.ID,colnames(cts))]
+####get same gens as previous P4 dataset
+
+#####avoid these wehen working with ENSEMBL
+# 1. Convert from ensembl.gene to gene.symbol
+geneIDs1 <- ensembldb::select(EnsDb.Hsapiens.v86, keys= rownames(my.cts), keytype = "GENEID", columns = c("SYMBOL","GENEID"))
+
+my.cts$GENEID<-rownames(my.cts)
+
+my.cts<-merge(my.cts, geneIDs1,by="GENEID")
+####same number of genes as bebore
+my.cts<-my.cts[my.cts$SYMBOL %in% rownames(lCPM18),]
+###remove duplicates
+my.cts<-my.cts[!(duplicated(my.cts$SYMBOL)),]
+rownames(my.cts)<-my.cts$SYMBOL
+my.cts<-my.cts[,c(2:95)]
+
+#####
+########
+###### go to previous one and get same genes
+my.cts<-my.cts[rownames(my.cts) %in% rownames(lCPM18),]
+lCPM18<-lCPM18[rownames(lCPM18) %in% rownames(my.cts),]
+my.cts<-my.cts[rownames(my.cts) %in% rownames(lCPM18),]
+
+my.cts<-my.cts[match(rownames(lCPM18),rownames(my.cts)),]
+
+y <- DGEList(counts=as.matrix(my.cts),group=samplesheet$IMID)##
+
+dim(y)
+
+y$samples$lib.size <- colSums(y$counts)
+
+y <- calcNormFactors(y, method="TMM")
+
+lCPM21 <- cpm(y, normalized.lib.sizes = TRUE, log = TRUE, prior.count = 2) 
+##same but using mean age
+#lCPM21 <- removeBatchEffect(lCPM21, batch = samplesheet$Sex, covariates = cbind(samplesheet$Age))
+lCPM21 <- removeBatchEffect(lCPM21, batch = relevel(samplesheet$Sex,ref="Male"), covariates = cbind(samplesheet$Age-mean(samplesheet$Age)))
+
+#####First, conduct PCA
+
+pca.aug21 <- FactoMineR::PCA(t(lCPM21), scale.unit = T, graph = F, ncp = 20)### scale
+factoextra::fviz_pca_ind(pca.aug21, axes = c(1,2), habillage=as.factor(samplesheet$IMID),geom="point")+ coord_fixed()+ggtitle("PCA Aug21 ")
+pca.aug18 <- FactoMineR::PCA(t(lCPM18), scale.unit = T, graph = F, ncp = 20)### scale
+factoextra::fviz_pca_ind(pca.aug18, axes = c(1,2), habillage=as.factor(sampleTable$imid),geom="point")+ coord_fixed()+ggtitle("PCA Aug18 ")
+
+factoextra::fviz_eig(pca.aug21)
+factoextra::fviz_eig(pca.aug18)
+
+```
+
+```{r}
+factoextra::fviz_pca_ind(pca.aug18, axes = c(1,2), habillage=as.factor(my.samplesheet$imid),geom="point")+ coord_fixed()+ggtitle("PCA Aug18 ")
+
+factoextra::fviz_eig(pca.aug18)
+```
+##compare both
+```{r}
+###same order
+pcs.aug18 <- data.frame(pca.aug18$var$coord)
+pcs.aug21 <- data.frame(pca.aug21$var$coord)
+
+#pcs.aug18<-pcs.aug18[match(rownames(pcs.aug21),rownames(pcs.aug18)),]
+
+# Compute correlation matrix
+cor.df <- cor(pcs.aug18[,1:10], pcs.aug21[,1:10], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```
+Afer correcting for sex, age and batch everything same correct 
+
+##compare both
+```{r}
+
+lCPM21_adj <- removeBatchEffect(lCPM21, covariates = cbind(pca.aug21$ind$coord[,1]))
+
+##adjusted PCAs
+pca.aug21.Adj <- FactoMineR::PCA(t(lCPM21_adj), scale.unit = T, graph = F, ncp = 20)### scale
+
+factoextra::fviz_eig(pca.aug21.Adj)
+
+pcs.aug21.adj <- data.frame(pca.aug21.Adj$var$coord)
+
+```
+Gene Enrichment
+
+###Correlation of Aug21 with other datasets. Select Davenport because it is the only RNAseq, paired-end WB PAXgene with Globin reduction, aka most similar
+```{r}
+
+daven <- gzfile("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/External_Datasets/Ext_SLE_GSE116006_Davenport_2018/01_GEOeMatrix/GSE116006/GSE116006_Davenport_processed_data.txt.gz")
+daven<-read.delim(daven,header=T)
+
+pheno<-readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/External_Datasets/Ext_SLE_GSE116006_Davenport_2018/Metadata/Pheno_GSE116006.rds")
+####remove dot and final number
+
+
+daven$GENEID<-sapply(daven$Ensembl_ID,function(x) return(as.character(unlist(strsplit(x,"\\."))[[1]])))
+
+rownames(daven)<-daven$GENEID
+daven<-daven[,2:465]
+#####remember that this data is Globin reducted and log cpm +1
+##put same order as pheno and remove sex and age
+pheno$ID<-gsub("subject","",pheno$title)
+pheno$ID<-gsub("week","W",pheno$ID)
+pheno<-pheno[pheno$ID %in% colnames(daven),]
+daven<-daven[,colnames(daven) %in% pheno$ID]
+daven<-daven[,match(pheno$ID,colnames(daven))]
+
+daven <- removeBatchEffect(as.matrix(daven), batch = as.factor(pheno$`subject sex:ch1`), covariates = cbind(as.numeric(pheno$`subject age:ch1`)))
+####get symbols
+geneIDs1 <- ensembldb::select(EnsDb.Hsapiens.v86, keys= rownames(daven), keytype = "GENEID", columns = c("SYMBOL","GENEID"))
+daven<-as.data.frame(daven)
+daven$GENEID<-rownames(daven)
+
+daven<-merge(daven, geneIDs1,by="GENEID")
+daven<-daven[!(duplicated(daven$SYMBOL)),]
+
+####same number of genes as bebore
+daven<-daven[daven$SYMBOL %in% rownames(pcs.aug18),]
+#daven<-daven[daven$SYMBOL %in% rownames(pcs.aug21),]
+
+rownames(daven)<-daven$SYMBOL
+daven<-daven[,2:434]
+#pcs.aug21<-pcs.aug21[rownames(pcs.aug21) %in% daven$SYMBOL,]
+pcs.aug18<-pcs.aug18[rownames(pcs.aug18) %in% rownames(daven),]
+
+##correlations
+
+# Hung
+pca.daven<- FactoMineR::PCA(t(daven), scale.unit = T, graph = F, ncp = 20)### scale
+
+
+#common.genes <- intersect(rownames(pcs.aug21), rownames(pca.daven$var$coord))##aug21
+common.genes <- intersect(rownames(pcs.aug18), rownames(pca.daven$var$coord))##aug18
+
+#mat <- cor(pca.daven$var$coord[common.genes,1:10], pcs.aug21[common.genes,1:10])
+#corrplot::corrplot(mat, method = "number", number.cex = 0.7)
+
+mat <- cor(pca.daven$var$coord[common.genes,1:10], pcs.aug18[common.genes,1:10])
+corrplot::corrplot(mat, method = "number", number.cex = 0.7)
+
+```
+###DEG
+```{r}
+##August 21
+##select SLE and CTRL
+
+my.samplesheet<-samplesheet[grep("SLE|CTRL",samplesheet$IMID),]
+my.samplesheet$IMID<-droplevels( my.samplesheet$IMID)
+
+#my.samplesheet$BActivity[my.samplesheet$IMID=="SLE"] <- ifelse(my.samplesheet$LES_F_12[my.samplesheet$IMID=="SLE"]>2, "HI", "LO")
+
+my.cts<-cts[,colnames(cts) %in% my.samplesheet$Library.ID]
+my.cts<-my.cts[,match( my.samplesheet$Library.ID,colnames(my.cts))]
+
+y <- DGEList(counts=as.matrix(my.cts),group=my.samplesheet$IMID)##
+
+keep <- rowSums(cpm(y)>2) >= min(table(y$samples$group))#
+y <- y[keep, ]
+
+dim(y)
+
+y$samples$lib.size <- colSums(y$counts)
+
+y <- calcNormFactors(y, method="TMM")
+#####Differentiall expression
+group<-as.factor(y$samples$group)
+group<-relevel(group,"CTRL")##Health always below!
+
+design <- model.matrix(~group+my.samplesheet$Sex+my.samplesheet$Age)
+
+colnames(design)[2]<-"Comp"
+
+###add design to the object
+y2 <- estimateDisp(y, design, robust=TRUE)
+#Now estimate gene-specific dispersions:
+
+plotBCV(y2)
+
+####radical solution
+fit <- glmQLFit(y2, design)
+res <- glmQLFTest(fit, coef="Comp")#
+
+results.21<-topTags(res,n= dim(res$table)[1],adjust.method="BH", sort.by="PValue")
+results.21<-results.21$table
+
+res<-subset(results.21,results.21$FDR<.05)
+
+# 1. Convert from ensembl.gene to gene.symbol
+
+geneIDs1 <- ensembldb::select(EnsDb.Hsapiens.v86, keys= rownames(res), keytype = "GENEID", columns = c("SYMBOL","GENEID"))
+
+res$GENEID<-rownames(res)
+
+res<-merge(res, geneIDs1,by="GENEID")
+res.aug21<-res[order(res$PValue),]
+###ad metric to correlate, multiply Pval using lFC sign
+
+res.aug21$metric21<-ifelse(res.aug21$logFC>0,-log10(res.aug21$PValue),log10(res.aug21$PValue))
+res.aug21$Gene<-res.aug21$SYMBOL
+
+###
+geneIDs1 <- ensembldb::select(EnsDb.Hsapiens.v86, keys= rownames(results.21), keytype = "GENEID", columns = c("SYMBOL","GENEID"))
+
+results.21$GENEID<-rownames(results.21)
+
+results.21<-merge(results.21, geneIDs1,by="GENEID")
+results.21$metric21<-ifelse(results.21$logFC>0,-log10(results.21$PValue),log10(results.21$PValue))
+
+
+
+
+```
+###DEG P4
+
+```{r}
+cts.set1 <- readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Counts/Raw_counts_RNAseq.rds")
+
+
+# Sample table ordered by celgIdAll
+sampleTable <- readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Annotation_RNAseq_Table.rds")
+sampleTable <- sampleTable[sampleTable$Outliers_PCA == "No",]
+####select same number of samples 16 SLE and 11 CTRLs
+
+
+my.samplesheet<-sampleTable[grep("SLE|CTRL",sampleTable$imid),]
+my.samplesheet<-my.samplesheet[my.samplesheet$batch=="B1",]
+my.samplesheet$imid<-droplevels( my.samplesheet$imid)
+my.samplesheet<-my.samplesheet[order(my.samplesheet$imid),]
+
+my.cts<-cts.set1[,colnames(cts.set1) %in% my.samplesheet$donaId]
+my.cts<-my.cts[,match(my.samplesheet$donaId,colnames(my.cts))]
+
+y <- DGEList(counts=as.matrix(my.cts),group=my.samplesheet$imid)##
+
+keep <- rowSums(cpm(y)>2) >= min(table(y$samples$group))#
+y <- y[keep, ]
+
+dim(y)
+
+y$samples$lib.size <- colSums(y$counts)
+
+y <- calcNormFactors(y, method="TMM")
+#####Differential expression
+group<-as.factor(y$samples$group)
+group<-relevel(group,"CTRL")##Health always below!
+
+#design <- model.matrix(~group+my.samplesheet$batch+my.samplesheet$Sex+my.samplesheet$age)
+design <- model.matrix(~group+my.samplesheet$Sex+my.samplesheet$age)
+
+colnames(design)[2]<-"Comp"
+
+
+###add design to the object
+y2 <- estimateDisp(y, design, robust=TRUE)
+#Now estimate gene-specific dispersions:
+
+plotBCV(y2)
+
+####radical solution
+fit <- glmQLFit(y2, design)
+res <- glmQLFTest(fit, coef="Comp")#
+
+results.18<-topTags(res,n= dim(res$table)[1],adjust.method="BH", sort.by="PValue")
+results.18<-results.18$table
+
+res.aug18<-subset(results.18,results.18$FDR<.05)
+res.aug18$metric18<-ifelse(res.aug18$logFC>0,-log10(res.aug18$PValue),log10(res.aug18$PValue))
+res.aug18$Gene<-rownames(res.aug18)
+
+
+results.18$metric18<-ifelse(results.18$logFC>0,-log10(results.18$PValue),log10(results.18$PValue))
+results.18$SYMBOL<-rownames(results.18)
+```
+###comparison
+```{r,echo=TRUE, fig.keep='all'}
+
+
+##all genes
+#genes2plot<-merge(results.18[,c("SYMBOL","metric18")],results.21[,c("SYMBOL","metric21")],by="SYMBOL")
+##only significant, keep it to get particular genes on 1st and 4th quadrant
+genes2plot<-merge(res.aug18[,c("Gene","metric18")],res.aug21[,c("Gene","metric21")],by="Gene")
+
+mod1 <-lm(as.numeric(genes2plot$metric18)~as.numeric(genes2plot$metric21))## 
+modsum<-summary(mod1)
+
+r2 <- cor.test(as.numeric(genes2plot$metric18),as.numeric(genes2plot$metric21),method="pearson")$estimate
+my.p<-cor.test(as.numeric(genes2plot$metric18),as.numeric(genes2plot$metric21),method="pearson")$p.value
+my.p<-signif(my.p, digits=3)
+
+
+mylabel = bquote(italic(R)^2 == .(format(r2, digits = 3)))
+plot(as.numeric(genes2plot$metric18)~as.numeric(genes2plot$metric21), xlab="Aug21 ", ylab="Aug18", pch=20,col="grey40")
+ #    ,xlim=c(0,10000),ylim=c(0,10000))
+#  plot(as.numeric(cnts[,1])~as.numeric(cnts[,2]), main=paste("Correlation","Pulse Replicates Global", "p-value", my.p, sep=" "), xlab="Ctrl1", ylab="Ctrl2", pch=20)
+
+abline(mod1, col="red")
+
+legend('topleft', legend = mylabel, bty = 'n')
+legend(x=-6,y=40, legend = paste("pval=",my.p, sep=""),bty = 'n')
+
+##let's try to investigate genes in upper left and those in bottom-right
+
+#up.left<-genes2plot[genes2plot$metric18>0 & genes2plot$metric21< -2,"Gene"]
+
+#bottom.right<-genes2plot[genes2plot$metric18<0 & genes2plot$metric21> 2,"Gene"]
+####for reduced
+up.left<-genes2plot[genes2plot$metric18< -2 & genes2plot$metric21< -2,"Gene"]
+
+bottom.right<-genes2plot[genes2plot$metric18<2 & genes2plot$metric21> 2,"Gene"]
+
+
+up.right<-genes2plot[genes2plot$metric18> 2 & genes2plot$metric21 > 2,"Gene"]
+
+bottom.left<-genes2plot[genes2plot$metric18<0 & genes2plot$metric21< -2,"Gene"]
+##conduct GO for both
+```
+Genes and pathways overlapping
+```{r,echo=TRUE, fig.keep='all'}
+#####GO enrichment analysis
+
+genesid<-up.left
+genesid<-bottom.right
+#genesid<-res.aug18[res.aug18$logFC>0,"Gene"]
+#genesid<-res.aug21[res.aug21$logFC>0,"Gene"]
+
+
+
+genesid<-genesid[ genesid != "" ]##remove empty elements from a vector
+genesid <- genesid[!is.na(genesid)]
+
+eg<-bitr(genesid, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+
+ego2 <- enrichGO(gene         = eg$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.1,
+                 qvalueCutoff  = .05,
+                 readable=T
+)
+
+dotplot(ego2, title="DEG UP Aug21",showCategory=30)
+dotplot(ego2, title="Bottom right",showCategory=30)
+
+
+####compare both gene profiles
+##FDR comp
+
+res.aug18<-res.aug18[res.aug18$FDR<.001,]
+res.aug21<-res.aug21[res.aug21$PValue<.005,]
+
+genes18<-res.aug18[res.aug18$logFC>0,"Gene"]
+genes21<-res.aug21[res.aug21$logFC>0,"Gene"]
+
+
+eg18<-bitr(genes18, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+eg21<-bitr(genes21, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+####classical way to get enrichment and then try overlap pathways and make a diagram
+
+enrich.18<-enrichGO(gene         = eg18$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.05,
+                 qvalueCutoff  = .05,
+                 readable=T
+)
+
+enrich.18<-as.data.frame(enrich.18)
+
+
+enrich.21<-enrichGO(gene         = eg21$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.05,
+                 qvalueCutoff  = .05,
+                 readable=T
+)
+
+enrich.21<-as.data.frame(enrich.21)
+
+library(GOSemSim)
+#d <- godata('org.Hs.eg.db', ont="BP", computeIC=FALSE)
+#
+#mgoSim(enrich.18$ID, enrich.21$ID, semData = d, measure="Lin", combine=NULL)#The BMA method, used the best-match average strategy, calculates the average of all maximum similarities on each row and column,
+
+
+
+
+library(gplots)
+##venn(list(Aug18=enrich.18$ID,Aug21=enrich.21$ID))
+
+phyper(q, m, n, k, lower.tail = FALSE, log.p = FALSE)
+#where:
+#q=size of overlap-1;299
+#m=number of pathways in aug18, 1303
+#n=(total number of pathways -m);16105-1303
+#k=number of pathways in aug21 450
+
+
+my.go.list<-go$idList
+
+go.bp<-go$idTable[go$idTable$ONTOLOGY=="BP",]
+
+my.go.list<-my.go.list[names(my.go.list) %in% go.bp$GOID]
+
+##filter by n<10 and n>300
+my.go.list<-my.go.list[names(my.go.list) %in% go.bp$GOID]
+go.to.remove <- sapply(my.go.list, function(i) length(i) < 10 | length(i) > 300)
+  # remove found elements
+  my.go.list <- my.go.list[!go.to.remove]
+
+phyper(299, 1303, 6221-1303, 450, lower.tail = FALSE, log.p = FALSE)
+phyper(217, 610, 6221-610, 450, lower.tail = FALSE, log.p = FALSE)
+
+####Rank enrichment test
+####rank Aug18 paths
+
+rank18<- -log10(enrich.18$qvalue)
+names(rank18)<-enrich.18$ID
+
+overlap.paths<-enrich.21$ID[enrich.21$ID %in% enrich.18$ID]
+my.list<-list(overlap.paths)
+###Distribution of ranks ovals
+hist(rank18)
+```
+```{r}
+df.rank18<-data.frame(rank18)
+df.rank18 <- df.rank18 %>%
+  mutate(color_name=case_when(rank18>3              ~ "red",
+                              rank18>=2 & rank18 <=3 ~ "blue",
+                              rank18 <2                  ~ "cyan")) 
+
+
+p<-ggplot(df.rank18,aes(x=rank18, fill=color_name)) +
+  geom_histogram(binwidth = 1, boundary = 0, position="dodge") +
+  stat_bin(aes(y=..count.., label=ifelse(..count..==0,"",..count..)), geom="text", vjust=-5)+
+  scale_fill_identity(guide = "legend")
+p
+#You can save the plot as a variable (I'll use the example of x), then create use a ggplot_build function on it, saved into a data frame like this:
+
+x1 <- data.frame(ggplot_build(p)$data[[1]])
+#In the resulting data frame, the xmin and xmax variables show the spans on each bin. you can use x1$xmin[1] and all x1$xmax values to see the start, break points, and end point of the bins.
+####three 
+my.bins<-x1[x1$density !=0,]
+
+high.signif<-rank18[rank18>3]##46
+signif<-rank18[rank18<=3 & rank18>=2]##804
+non.signif<-rank18[rank18<2]##342
+```
+
+
+```{r}
+
+##cut based on prev
+
+df<-as.data.frame(rank18)
+df$GOID<-rownames(df)
+colnames(df)[1]<-"Rank"
+df$rank_grp <- df$Rank
+
+####ranks based on my.bins, use as label, interval
+
+#df$rank_grp <- ifelse((df$Rank>=83.67 & df$Rank<=84) , 'A',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=22.67 & df$Rank<=23) , 'B',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=18.67 & df$Rank<=19) , 'C',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=17.67 & df$Rank<=18) , 'D',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=16.67 & df$Rank<=17) , 'E',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=15.67 & df$Rank<=16) , 'F',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=14.67 & df$Rank<=15) , 'G',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=13.67 & df$Rank<=14) , 'H',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=12.67 & df$Rank<=13) , 'I',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=11.67 & df$Rank<=12) , 'J',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=10.67 & df$Rank<=11) , 'K',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=9.67 & df$Rank<=10) , 'L',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=8.67 & df$Rank<=9) , 'M',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=7.67 & df$Rank<=8) , 'N',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=6.67 & df$Rank<=7) , 'P',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=5.67 & df$Rank<=6) , 'Q',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=3.67 & df$Rank<=4) , 'S',df$rank_grp)
+##df$rank_grp <- ifelse((df$Rank>=4.67 & df$Rank<=5) , 'R',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=1.33 & df$Rank<=1.67) , 'T',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=2 & df$Rank<=2.33) , 'U',df$rank_grp)
+
+df$rank_grp <- ifelse((df$Rank>=83.67 & df$Rank<=84) , '84_84.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=22.67 & df$Rank<=83.67) , '84.7_23.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=18.67 & df$Rank<=22.67) , '23.7_18.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=17.67 & df$Rank<=18.67) , '18.7_17.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=16.67 & df$Rank<=17.67) , '17.7_16.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=15.67 & df$Rank<=16.67) , '16.7_15.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=14.67 & df$Rank<=15.67) , '15.7_14.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=13.67 & df$Rank<=14.67) , '14.7_13.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=12.67 & df$Rank<=13.67) , '13.7_12.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=11.67 & df$Rank<=12.67) , '12.7_11.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=10.67 & df$Rank<=11.67) , '11.7_10.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=9.67 & df$Rank<=10.67) , '10.7_9.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=8.67 & df$Rank<=9.67) , '9.7_8.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=7.67 & df$Rank<=8.67) , '8.7_7.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=6.67 & df$Rank<=7.67) , '7.7_6.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=5.67 & df$Rank<=6.67) , '6.7_5.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=4.67 & df$Rank<=5.67) , '5.7_4.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=3.67 & df$Rank<=4.67) , '4.7_3.7',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=2.33 & df$Rank<=3.67) , '3.7_2.3',df$rank_grp)
+df$rank_grp <- ifelse((df$Rank>=1 & df$Rank<=2.33) , '2.3_1',df$rank_grp)
+
+##arbitrary
+#df$rank_grp <- ifelse((df$Rank>=3) , 'Highly_signif',df$rank_grp)
+#df$rank_grp <- ifelse((df$Rank>=2 & df$Rank<=3) , 'Signif',df$rank_grp)
+#df$rank_grp <- ifelse(df$Rank<=2 , 'Low_signif',df$rank_grp)
+
+###now see how many of overlap_paths are in each group
+
+df$Overl<-ifelse(df$GOID %in% overlap.paths,"Y","N")
+
+df2<-df %>% count(rank_grp, Overl, sort = TRUE) 
+
+df2$rank_grp <- factor(df2$rank_grp,levels = c("84_84.7", "84.7_23.7", "23.7_18.7","18.7_17.7","17.7_16.7","16.7_15.7","15.7_14.7","14.7_13.7","13.7_12.7","12.7_11.7","11.7_10.7","10.7_9.7","9.7_8.7","8.7_7.7",
+                                               "7.7_6.7","6.7_5.7","5.7_4.7","4.7_3.7","3.7_2.3","2.3_1"))
+
+df2$Overl <- factor(df2$Overl,levels = c("Y", "N"))
+
+df2<-df2[order(df2$rank_grp),]
+df2 <- df2 %>% group_by(rank_grp) %>% mutate(PERCENTAGE=n/sum(n))
+df2$PERCENTAGE<-round(df2$PERCENTAGE,digits=2)*100
+
+df2<-df2[!(is.na(df2$rank_grp)),]
+
+p<-ggplot(data=subset(df2,PERCENTAGE != 0), aes(fill=Overl, y=PERCENTAGE, x=rank_grp,order=Overl)) + 
+  geom_bar(stat="identity") +
+ # ggtitle("Global analysis") +
+#  facet_wrap(~Test) +
+ # theme_ipsum() +
+ # theme(legend.position="none") +
+  scale_fill_brewer(palette="Set2")+
+  geom_text(aes(label=paste(PERCENTAGE, "%")), 
+            color="white", size=3,position = position_stack(vjust = 0.5),
+            fontface = "bold")+
+  #geom_col(position = position_dodge2(width = 0.9, preserve = "single")) +
+  #geom_text(position = position_dodge2(width = 0.9, preserve = "single"), angle = 90, vjust=0.25)+
+  xlab("")+
+  ylab("")+
+  rotate_x_text(angle = 45)
+  
+#p+theme_classic()+rotate_x_text(angle = 45)
+
+p
+
+ifelse(df2$Overl=="Y",apply(df2,1,function(x) return(phyper(197, (198+295), 1192-(198+295), 300, lower.tail = FALSE, log.p = FALSE))))
+
+phyper(2, 2, 1192-2, 300, lower.tail = FALSE, log.p = FALSE)## top 4.783-14
+phyper(21, 71, 1192-71, 300, lower.tail = FALSE, log.p = FALSE)## top 4.783-14
+
+
+
+
+```
+```{r}
+go.bp<-go$idTable[go$idTable$ONTOLOGY=="BP",]
+#1.213956e-224 overlap
+#7.01995e-198 overlap
+####
+my.list<-list(eg18$ENTREZID,eg21$ENTREZID)
+names(my.list)<-c("Aug18","Aug21")
+ck <- compareCluster(geneCluster = my.list, fun = "enrichGO",OrgDb= org.Hs.eg.db,ont= "BP")
+
+###get stats
+
+ck.df<-as.data.frame(ck)
+
+pathways.18<-ck.df[ck.df$Cluster=="Aug18",]##610
+pathways.21<-ck.df[ck.df$Cluster=="Aug21",]##450
+dim(pathways.21)
+
+
+#common.paths<-rbind(pathways.18[,c("Cluster","ID","qvalue","GeneRatio")],pathways.18[,c("Cluster","ID","qvalue","GeneRatio")])
+
+common.paths<-merge(pathways.18[,c("Cluster","ID","qvalue","GeneRatio")],pathways.21[,c("Cluster","ID","qvalue","GeneRatio")],by="ID")
+#####plot corr
+library(ggpubr)
+
+
+ggscatter(
+  common.paths, x = 'qvalue.x', y = 'qvalue.y', 
+  add = "reg.line", conf.int = FALSE
+  )+
+  stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), show.legend = FALSE) 
+#+
+  #stat_regline_equation(label.x = 3, label.y = 32)
+
+
+
+#sc<-showCategory[ 1:200]
+enrichplot::dotplot(ck,showCategory=showCategory,includeAll = T)
+
+
+####test also overlap of genes
+#library(GeneOverlap)
+#aug18.res<-list(UP_Aug18=res.aug18[res.aug18$logFC>0,"Gene"],DO_Aug18=res.aug18[res.aug18$logFC<0,"Gene"])
+#aug21.res<-list(UP_Aug21=res.aug21[res.aug21$logFC>0,"Gene"],DO_Aug21=res.aug21[res.aug21$logFC<0,"Gene"])
+#go.obj <- newGeneOverlap(aug18.res$UP_Aug18,aug21.res$UP_Aug21,genome.size=16225)
+#go.obj <- newGeneOverlap(aug18.res$DO_Aug18,aug21.res$DO_Aug21,genome.size=16225)
+#go.obj <- testGeneOverlap(go.obj)
+
+
+phyper(290, 1192, 16105-1192, 450, lower.tail = FALSE, log.p = FALSE)
+
+```
+```{r}
+#####GO enrichment analysis
+
+genesid<-bottom.right
+
+genesid<-genesid[ genesid != "" ]##remove empty elements from a vector
+genesid <- genesid[!is.na(genesid)]
+
+eg<-bitr(genesid, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+
+ego2 <- enrichGO(gene         = eg$ENTREZID,
+                 OrgDb         = org.Hs.eg.db,
+                 keyType       = 'ENTREZID',
+                 ont           = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff  = 0.1,
+                 qvalueCutoff  = .05,
+                 readable=T
+)
+
+dotplot(ego2, title="SLE vs CTRL common DEG",showCategory=30)
+
+```
+##Randomized analysis
+
+```{r,echo=TRUE, fig.keep='all'}
+#####get randomization of Aug21 column names and conduct DEG again
+my.samplesheet<-samplesheet[grep("SLE|CTRL",samplesheet$IMID),]
+my.samplesheet$IMID<-droplevels( my.samplesheet$IMID)
+###randomize IMID, sex and age columns
+my.samplesheet$IMID<-sample(my.samplesheet$IMID)
+my.samplesheet$Age<-sample(my.samplesheet$Age)
+my.samplesheet$Age<-sample(my.samplesheet$Age)
+
+
+
+my.cts<-cts[,colnames(cts) %in% my.samplesheet$Library.ID]
+my.cts<-my.cts[,match( my.samplesheet$Library.ID,colnames(my.cts))]
+
+y <- DGEList(counts=as.matrix(my.cts),group=my.samplesheet$IMID)##
+
+keep <- rowSums(cpm(y)>2) >= min(table(y$samples$group))#
+y <- y[keep, ]
+
+dim(y)
+
+y$samples$lib.size <- colSums(y$counts)
+
+y <- calcNormFactors(y, method="TMM")
+#####Differentiall expression
+group<-as.factor(y$samples$group)
+group<-relevel(group,"CTRL")##Health always below!
+
+design <- model.matrix(~group+my.samplesheet$Sex+my.samplesheet$Age)
+
+colnames(design)[2]<-"Comp"
+
+###add design to the object
+y2 <- estimateDisp(y, design, robust=TRUE)
+#Now estimate gene-specific dispersions:
+
+plotBCV(y2)
+
+####radical solution
+fit <- glmQLFit(y2, design)
+res <- glmQLFTest(fit, coef="Comp")#
+
+results.21.rd<-topTags(res,n= dim(res$table)[1],adjust.method="BH", sort.by="PValue")
+results.21.rd<-results.21.rd$table
+
+res<-subset(results.21.rd,results.21.rd$PValue<.05)
+
+# 1. Convert from ensembl.gene to gene.symbol
+
+geneIDs1 <- ensembldb::select(EnsDb.Hsapiens.v86, keys= rownames(res), keytype = "GENEID", columns =c("SYMBOL","GENEID"))
+
+res$GENEID<-rownames(res)
+
+res<-merge(res, geneIDs1,by="GENEID")
+res.aug21.rd<-res[order(res$PValue),]
+###ad metric to correlate, multiply Pval using lFC sign
+
+res.aug21.rd$metric21<-ifelse(res.aug21.rd$logFC>0,-log10(res.aug21.rd$PValue),log10(res.aug21.rd$PValue))
+res.aug21.rd$Gene<-res.aug21.rd$SYMBOL
+
+###
+```
+```{r,echo=TRUE, fig.keep='all'}
+genes2plot<-merge(res.aug18[,c("Gene","metric18")],res.aug21.rd[,c("Gene","metric21")],by="Gene")
+
+mod1 <-lm(as.numeric(genes2plot$metric18)~as.numeric(genes2plot$metric21))## 
+modsum<-summary(mod1)
+
+r2 <- cor.test(as.numeric(genes2plot$metric18),as.numeric(genes2plot$metric21),method="pearson")$estimate
+my.p<-cor.test(as.numeric(genes2plot$metric18),as.numeric(genes2plot$metric21),method="pearson")$p.value
+my.p<-signif(my.p, digits=3)
+
+
+mylabel = bquote(italic(R)^2 == .(format(r2, digits = 3)))
+plot(as.numeric(genes2plot$metric18)~as.numeric(genes2plot$metric21), xlab="Aug21 ", ylab="Aug18", pch=20,col="grey40")
+ #    ,xlim=c(0,10000),ylim=c(0,10000))
+#  plot(as.numeric(cnts[,1])~as.numeric(cnts[,2]), main=paste("Correlation","Pulse Replicates Global", "p-value", my.p, sep=" "), xlab="Ctrl1", ylab="Ctrl2", pch=20)
+abline(mod1, col="red")
+#
+
+legend('topleft', legend = mylabel, bty = 'n')
+legend(x=-6,y=40, legend = paste("pval=",my.p, sep=""),bty = 'n')
+
+###get proportions
+####different direction
+up.left<-genes2plot[genes2plot$metric18> 10 & genes2plot$metric21< -1,"Gene"]
+
+bottom.right<-genes2plot[genes2plot$metric18<0 & genes2plot$metric21> 1,"Gene"]
+
+##same direction
+up.right<-genes2plot[genes2plot$metric18> 0 & genes2plot$metric21 > 1,"Gene"]
+
+bottom.left<-genes2plot[genes2plot$metric18<10 & genes2plot$metric21< -1,"Gene"]
+
+```
+Compare all common genes 
+```{r,echo=TRUE, fig.keep='all'}
+####get values from lCPM18 and lCPM21
+
+
+set18<-apply(lCPM18,1,median)
+set21<-apply(lCPM21,1,median)
+
+####consider also, to remove globins using removebatch form previous clean data
+globins<-c("HBA1","HBA2","^HBB$")
+
+##proportion of matched glbin matched reads
+matches <- grep(paste(c(globins),collapse="|"), rownames(lCPM18))
+globins.cts<-lCPM18[matches,]
+
+
+globins.round1<-apply(globins.cts,2,mean)
+lCPM18_adj <- removeBatchEffect(lCPM18, covariates = cbind(globins.round1))
+
+matches <- grep(paste(c(globins),collapse="|"), rownames(lCPM21))
+globins.cts<-lCPM21[matches,]
+
+
+globins.round1<-apply(globins.cts,2,mean)
+
+lCPM21_adj <- removeBatchEffect(lCPM21, covariates = cbind(globins.round1))
+
+#set18<-apply(lCPM18_adj,1,median)
+#set21<-apply(lCPM21_adj,1,median)
+
+
+##same order
+
+set21<-set21[match(names(set18),names(set21))]
+
+##try to see in same plot coding vs non coding
+
+library(biomaRt)
+mart <- useMart("ENSEMBL_MART_ENSEMBL", host = "useast.ensembl.org")
+mart <- useDataset("hsapiens_gene_ensembl", mart)
+annotLookup <- getBM(
+  mart = mart,
+  attributes = c(
+    "hgnc_symbol",
+    "entrezgene_id",
+    "ensembl_gene_id",
+    "gene_biotype"),
+  filter = "hgnc_symbol",
+  values = names(set21),
+  uniqueRows=TRUE)
+
+
+
+mod1 <-lm(as.numeric(set18)~as.numeric(set21))## 
+modsum<-summary(mod1)
+
+r2 <- cor.test(as.numeric(set18),as.numeric(set21),method="pearson")$estimate
+my.p<-cor.test(as.numeric(set18),as.numeric(set21),method="pearson")$p.value
+my.p<-signif(my.p, digits=3)
+
+
+mylabel = bquote(italic(R)^2 == .(format(r2, digits = 3)))
+plot(as.numeric(set18)~as.numeric(set21), xlab="Aug21 log2(median CPM+2) ", ylab="Aug18 log2(median CPM+2)", pch=20,col="grey40")
+ #    ,xlim=c(0,10000),ylim=c(0,10000))
+#  plot(as.numeric(cnts[,1])~as.numeric(cnts[,2]), main=paste("Correlation","Pulse Replicates Global", "p-value", my.p, sep=" "), xlab="Ctrl1", ylab="Ctrl2", pch=20)
+
+abline(mod1, col="red")
+
+legend('topleft', legend = mylabel, bty = 'n')
+legend(x=-5,y=11, legend = paste("pval=",my.p, sep=""),bty = 'n')
+
+
+set18.df<-as.data.frame(set18)
+set18.df$hgnc_symbol<-rownames(set18.df)
+set21.df<-as.data.frame(set21)
+set21.df$hgnc_symbol<-rownames(set21.df)
+my.df<-merge(set18.df,set21.df,by="hgnc_symbol")
+my.df<-merge(my.df,annotLookup,by="hgnc_symbol")
+my.df$Class<-ifelse(my.df$gene_biotype=="protein_coding","Prot_coding","Non_coding")
+
+library(ggpubr)
+
+###coding and non coding separately
+my.df2<-my.df[my.df$Class=="Prot_coding",]
+my.df2<-my.df[my.df$Class=="Non_coding",]
+
+####
+ggscatter(
+  my.df2, x = 'set18', y = 'set21', color = 'Class', 
+  add = "reg.line", conf.int = FALSE
+  )+
+  stat_cor(aes(color = Class, label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), show.legend = FALSE) 
+#+
+  #stat_regline_equation(label.x = 3, label.y = 32)
+
+
+lm_eqn <- function(df){
+    m <- lm(set21 ~ set18, my.df2);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}
+
+
+p <- ggplot(data = my.df2, aes(x = set18, y = set21)) +
+            geom_point(alpha=0.8,color="red")+
+            geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) 
+
+
+p1 <- p + geom_text(x = 0, y = 12, label = lm_eqn(my.df2), parse = T,show.legend = FALSE,color="black")
+
+p1
+###look for outlier gene
+sel.genes<-my.df2[my.df2$set18>4 & my.df2$set21< -1, ]
+sel.genes<-unique(sel.genes$hgnc_symbol)
+
+
+
+######ALL
+ggscatter(
+  my.df, x = 'set18', y = 'set21', color = 'Class', 
+  add = "reg.line", conf.int = FALSE
+  )+
+  stat_cor(aes(color = Class, label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), show.legend = FALSE) 
+#+
+  #stat_regline_equation(label.x = 3, label.y = 32)
+
+
+lm_eqn <- function(df){
+    m <- lm(set21 ~ set18, my.df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}
+
+
+p <- ggplot(data = my.df, aes(x = set18, y = set21,color=Class)) +
+            geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+            geom_point(alpha = 0.3)
+
+p1 <- p + geom_text(x = 0, y = 12, label = lm_eqn(my.df), parse = T,show.legend = FALSE,color="black")
+
+p1
+```
+Effect size
+```{r,echo=TRUE, fig.keep='all'}
+library(effsize)
+
+#Computes the Cliff's Delta effect size for ordinal variables with the related confidence interval using efficient algorithms.
+
+##subset to protein coding 
+
+pc<-my.df[my.df$Class=="Prot_coding",]
+nc<-my.df[my.df$Class=="Non_coding",]
+
+res.delta <- cliff.delta(pc$set18,pc$set21,return.dm=TRUE)
+res.delta <- cliff.delta(nc$set18,nc$set21,return.dm=TRUE)
+
+
+# bucketing values into bins
+set18_tags<-as.data.frame(pc$set18)
+set18_tags$Group="set18"
+colnames(set18_tags)[1]<-"tags"
+
+set21_tags<-as.data.frame(pc$set21)
+set21_tags$Group="set21"
+colnames(set21_tags)[1]<-"tags"
+
+df2plot<-rbind(set18_tags,set21_tags)
+#ggplot(data = df2plot, aes(x = tags, fill = Group)) + 
+ # geom_histogram(colour = 'white')+ geom_histogram(bins=30,alpha = 0.2)
+
+
+
+
+h1 <- hist(set18_tags$tags, breaks = 20)
+h2 <- hist(set21_tags$tags, breaks = 20)
+
+par(mar=c(5.1, 4.1, 4.1, 8.1), xpd=TRUE)
+c1 <- rgb(255,51,51,max = 255, alpha = 80, names = "lt.blue")
+c2 <- rgb(51,255,51, max = 255, alpha = 80, names = "lt.pink")
+
+plot(h1, col = c1, xlab = "log2(median CPM+2)",ylab="Genes",main = NULL)
+plot(h2, col = c2, add = T)
+
+legend(15, 17,c("Aug18", "Aug21"), fill = c(c1, c2), title = "Set")
+
+```
+Get IF genes from IF pathways and try to see its location in each set analysis
+First, select same number of samples 16 SLE and 11 CTRLs
+```{r DEG_subset}
+cts.set1 <- readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/01_Counts/Raw_counts_RNAseq.rds")
+
+
+# Sample table ordered by celgIdAll
+sampleTable <- readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Annotation_RNAseq_Table.rds")
+sampleTable <- sampleTable[sampleTable$Outliers_PCA == "No",]
+####select same number of samples 16 SLE and 11 CTRLs
+
+
+my.samplesheet<-sampleTable[grep("SLE|CTRL",sampleTable$imid),]
+my.samplesheet$imid<-droplevels( my.samplesheet$imid)
+my.samplesheet<-my.samplesheet[order(my.samplesheet$imid),]
+my.ctrls<-my.samplesheet[1:11,]
+my.sle<-my.samplesheet[my.samplesheet$imid=="SLE",]
+my.lo<-my.sle[my.sle$activity=="LO",]
+my.lo<-my.lo[1:10,]
+
+my.hi<-my.sle[my.sle$activity=="HI",]
+my.hi<-my.hi[1:6,]
+
+my.samplesheet<-rbind(my.ctrls,my.hi,my.lo)
+
+my.cts<-cts.set1[,colnames(cts.set1) %in% my.samplesheet$donaId]
+my.cts<-my.cts[,match(my.samplesheet$donaId,colnames(my.cts))]
+
+
+y <- DGEList(counts=as.matrix(my.cts),group=my.samplesheet$imid)##
+
+keep <- rowSums(cpm(y)>1) >= min(table(y$samples$group))#
+y <- y[keep, ]
+
+dim(y)
+
+y$samples$lib.size <- colSums(y$counts)
+
+y <- calcNormFactors(y, method="TMM")
+#####Differential expression
+group<-as.factor(y$samples$group)
+group<-relevel(group,"CTRL")##Health always below!
+
+design <- model.matrix(~group+my.samplesheet$batch+my.samplesheet$Sex+my.samplesheet$age)
+
+colnames(design)[2]<-"Comp"
+
+y2 <- estimateDisp(y, design, robust=TRUE)
+#Now estimate gene-specific dispersions:
+
+plotBCV(y2)
+####radical solution
+fit <- glmQLFit(y2, design)
+res <- glmQLFTest(fit, coef="Comp")#
+
+results.18<-topTags(res,n= dim(res$table)[1],adjust.method="BH", sort.by="PValue")
+results.18<-results.18$table
+
+res.aug18<-subset(results.18,results.18$PValue<.01)
+```
+```{r}
+library(fgsea)
+
+    library(tibble)
+    library(dplyr)
+    library(tidyr)
+    library(reshape2)
+    library(ComplexHeatmap)
+    library(circlize)
+####first, get IFI genes
+
+###Define functions
+
+
+getGO <- function(){
+  if(!requireNamespace("org.Hs.eg.db", quietly = TRUE))
+    stop("org.Hs.eg.db package required but not installed.")
+  egGO2ALLEGS <- utils::getFromNamespace("org.Hs.egGO2ALLEGS", "org.Hs.eg.db")
+  GeneID.PathID <- AnnotationDbi::toTable(egGO2ALLEGS)[,c("gene_id", "go_id", "Ontology")]
+  d <- !duplicated(GeneID.PathID[, c("gene_id", "go_id")])
+  GeneID.PathID <- GeneID.PathID[d, ]
+  GOID.TERM <- suppressMessages(AnnotationDbi::select(GO.db::GO.db, 
+                                                      keys=unique(GeneID.PathID$go_id), 
+                                                      columns=c("GOID","ONTOLOGY","TERM"), 
+                                                      keytype="GOID"))
+  go <- tapply(GeneID.PathID$gene_id, GeneID.PathID$go_id, list)
+  
+  list(idList=go, idTable=GOID.TERM)
+}
+
+
+go <- getGO()
+
+
+###get IFI pathways
+
+interferon_paths<-go$idTable[grep("interferon|Interferon",go$idTable$TERM),]
+###only BPs
+
+interferon_paths<-interferon_paths[interferon_paths$ONTOLOGY=="BP","GOID"]
+
+###collect only Liu's pathways in GO
+ifi.list<-go$idList[names(go$idList) %in% as.character(interferon_paths)]
+#get annotation
+go_table<-go$idTable[go$idTable$GOID %in% names(ifi.list),]
+
+####now, we have to rank our results
+aug21.gsea<-res.aug21[,c("GENEID","logFC")]
+
+eg<-bitr(aug21.gsea$GENEID, fromType="ENSEMBL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+colnames(eg)[1]<-"GENEID"
+
+aug21.gsea<-merge(aug21.gsea,eg, by="GENEID")
+rank.aug21<-aug21.gsea$logFC
+names(rank.aug21)<-aug21.gsea$ENTREZID
+
+###same for aug18
+res.aug18$Gene<-rownames(res.aug18)
+aug18.gsea<-res.aug18[,c("Gene","logFC")]
+
+eg<-bitr(aug18.gsea$Gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+colnames(eg)[1]<-"Gene"
+
+aug18.gsea<-merge(aug18.gsea,eg, by="Gene")
+rank.aug18<-aug18.gsea$logFC
+names(rank.aug18)<-aug18.gsea$ENTREZID
+####our aug18 must be a list of the particular genes that we found, res18, this is the set that must be enriched i our datat set, aug21, which must be a simple ranked set
+
+
+```
+```{r}
+library(trend)
+
+# Tidy the results:
+fgseaResTidy <- fgseaRes %>%
+  as_tibble() %>%
+  arrange(desc(NES)) # order by normalized enrichment score (NES)
+
+fgseaResTidy$adjPvalue <- ifelse(fgseaResTidy$padj <= 0.05, "significant", "non-significant")
+cols <- c("non-significant" = "grey", "significant" = "red")
+ggplot(fgseaResTidy, aes(reorder(pathway, NES), NES, fill = adjPvalue)) +
+  geom_col() +
+  scale_fill_manual(values = cols) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  coord_flip() +
+  labs(x="Pathway", y="Normalized Enrichment Score",
+  title="IFI Pathways Enrichment Score from Aug18")
+
+
+####Finally, consider ####our aug18 must be a list of the particular genes that we found, res18, this is the set that must be enriched i our datat set, aug21, which must be a simple ranked set
+
+up21.gsea<-aug21.gsea[aug21.gsea$logFC>0,]
+down21.gsea<-aug21.gsea[aug21.gsea$logFC<0,]
+my.list<-list(up21.gsea$ENTREZID)
+my.list<-list(down21.gsea$ENTREZID)
+
+names(my.list)<-"UP_DEG21"
+names(my.list)<-"DOWN_DEG21"
+
+fgseaRes <- fgsea(pathways = my.list, 
+                  stats    = rank.aug18,
+                  eps      = 0.0,
+                  minSize  = 15,
+                  maxSize  = 800)
+
+plotEnrichment(down21.gsea$ENTREZID,
+               rank.aug18) + labs(title="DEG_up Aug 21 pval<2.2e-16")
+```
+Microbiome analysis from now
+```{r}
+####Aug18 data
+setwd("/home/tonig/Microbiota/Test_no_UMIs/")
+
+
+kraken.umis<-read.csv("/home/tonig/Microbiota/Test_no_UMIs/Kraken_Species_ALL_HRGM.txt",head=T)##UMIs
+
+
+rownames(kraken.umis)<-kraken.umis$Taxa
+kraken.umis<-kraken.umis[,-1]
+colnames(kraken.umis)<-gsub("X","",colnames(kraken.umis))
+colnames(kraken.umis)<-gsub("\\.","-",colnames(kraken.umis))
+
+head(kraken.umis)
+
+####load correct samplesheet
+samplesid<-read.csv("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Old/Final_Table_GSL.ID.csv")
+
+samplesheet<-readRDS("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2017_IMX_P4RNAseq_NovaSeqK_IA/Metadata/Annotation_RNAseq_Table.rds")##change name of sample
+
+samplesheet<-merge(samplesheet,samplesid[,c("rna.code","GSL.ID","rna.RIN","Fragment.Size","KAPA.nM.","PicoGreen.ng.ul.","Reads")],by="rna.code")###only selected
+
+rownames(samplesheet)<-samplesheet$celgIdAll
+
+###subset for samples in Kraken output
+
+samplesheet<-samplesheet[samplesheet$GSL.ID %in% colnames(kraken.umis),]
+kraken.umis<-kraken.umis[,match(samplesheet$GSL.ID,colnames(kraken.umis))]
+colnames(kraken.umis)<-samplesheet$celgIdAll
+
+#####restrict with bona fide data, aka batches 1,2 and 3
+samplesheet<-samplesheet[samplesheet$new.plate %in% c(1,2,3),]
+
+###get init reads, but ones prior to enter in Kraken, not original one
+init.reads.non.umi<-read.delim("/home/tonig/FA_Kraken_ALL/Stats/Reads_init_UMIs.txt",head=F)
+colnames(init.reads.non.umi)<-c("GSL.ID","Init_Reads_NON_UMI")
+####remove
+init.reads.non.umi$GSL.ID<-gsub(".kraken","",init.reads.non.umi$GSL.ID)
+init.reads.non.umi$GSL.ID<-gsub("_","-",init.reads.non.umi$GSL.ID)
+samplesheet<-merge(samplesheet,init.reads.non.umi,by="GSL.ID")
+####select only ibds
+
+aug18.df<-samplesheet
+
+aug.18.ibd<-samplesheet[samplesheet$imid %in% c("CD","UC"),]
+
+```
+
+```{r}
+###recover first chunk to obtain samplesheet
+pheno<-readRDS("/home/proteome/bioinformatics/Data/Storage/Clinical/2008_IMIDKIT_IA/03_Preprocessed/clinicalData_v1.rds")
+
+##get shipment info
+
+my.table<-read_xlsx("/home/proteome/RAW_Data/RAW_S3_Bucket_Synchronized/2021_IMX_002_NovaSeqRZ_IA/Dataset_Files/SampleShipments/sApax_20may.2021_v1.xlsx")
+my.table<-my.table[,c("tubeCode","donationId")]
+
+####get correspondence using tubecode and indivID in pheno
+
+table(my.table$donationId %in% pheno$indivId)
+
+##merge, first change name of vaiable to do mergin 
+colnames(my.table)[2]<-"indivId"
+
+pheno<-merge(pheno[,c("indivId","Sex","Age","IMID","LES_F_12","CU_F_13","EC_F_02")],my.table,by="indivId")
+head(pheno)
+
+###Load info from GSL, sequenced samples
+##now get our samples
+###file sent by GSL to get Library ID and Internal GSL ID
+samples<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/filenames_HHMJ7DSX2.txt",head=T)
+samples<-samples[,c("Library.ID","Library_name")]
+samples<-samples[(!(duplicated(samples$Library_name))),]###duplicated because several Lanes per sample, whenever we select both, no problem to get unique ones
+
+####Samplesheet sent by GSL, we selected the sheet corresponding to the info we nedd
+
+samplesheet<-read.csv("/home/proteome/bioinformatics/Data/Storage/Molecular/GeneExpression/WholeBlood/2021_IMX_002_NovaSeqRZ_IA/Metadata/First_plate_samplesheet.csv")
+colnames(samples)[2]<-"Sample.ID"
+
+###merging samples, info about Library Code and INterna GSL, FASTQs are in Libra ID and then you got the counts with this Code
+samplesheet<-merge(samplesheet,samples, by="Sample.ID")
+samplesheet$tubeCode<-gsub(" ","",samplesheet$tubeCode)###some ones have extra space, probably because changin from xlsx to xls 
+samplesheet<-merge(samplesheet,pheno, by="tubeCode")
+
+
+kraken.21.reads<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/Test_Microb/Init_Reads_Aug21.txt",head=F)
+colnames(kraken.21.reads)<-c("Library.ID","Init_Reads_Aug21")
+kraken.21.reads$Library.ID<-gsub(".kraken","",kraken.21.reads$Library.ID)
+samplesheet<-merge(samplesheet,kraken.21.reads,by="Library.ID")
+
+aug21.df<-samplesheet
+
+aug.21.ibd<-aug21.df[aug21.df$IMID %in% c("CD","UC"),]
+
+
+####try to see differences/ similarities in input reads between both sets
+IReads<-c(aug18.df$Init_Reads_NON_UMI,aug21.df$Init_Reads_Aug21)
+class<-c(rep("Reads Aug18",length(aug18.df$Init_Reads_NON_UMI)),rep("Reads Aug21",length(aug21.df$Init_Reads_Aug21)))
+
+y.df<-data.frame(Reads=IReads,class=class)
+result<-aov(y.df$Reads~as.factor(class))
+
+res<-summary(result)
+pval<-res[[1]][["Pr(>F)"]][1]
+pval<-signif(pval, digits=3)
+##colours
+
+cols<-c("red","darkblue")
+
+###Boxplot
+
+p<-ggplot(y.df, aes(x=class, y=Reads, color=class)) +geom_boxplot(outlier.shape = NA)+geom_jitter()
+
+p<-p+scale_colour_manual(values=cols)+ggtitle(paste("Input clean reads kraken",pval,sep=" "))+ylab("Raw Reads")+xlab("")
+
+p+ ylim(0, 5.5e06)
+
+###same for IBD reads
+
+IReads<-c(aug.18.ibd$Init_Reads_NON_UMI,aug.21.ibd$Init_Reads_Aug21)
+class<-c(rep("Reads Aug18",length(aug.18.ibd$Init_Reads_NON_UMI)),rep("Reads Aug21",length(aug.21.ibd$Init_Reads_Aug21)))
+
+y.df<-data.frame(Reads=IReads,class=class)
+result<-aov(y.df$Reads~as.factor(class))
+
+res<-summary(result)
+pval<-res[[1]][["Pr(>F)"]][1]
+pval<-signif(pval, digits=3)
+##colours
+
+cols<-c("red","darkblue")
+
+###Boxplot
+
+p<-ggplot(y.df, aes(x=class, y=Reads, color=class)) +geom_boxplot(outlier.shape = NA)+geom_jitter()
+
+p<-p+scale_colour_manual(values=cols)+ggtitle(paste("Input clean reads kraken",pval,sep=" "))+ylab("Raw Reads")+xlab("")
+p
+p+ ylim(0, 5.5e06)
+
+```
+```{r}
+###analysis Aug21
+
+######split considering data you deal with
+
+imids<-c("UC","CD")
+###select umi or non umis
+kraken.sp<-read.csv("/home/tonig/RNAseq_FASTQ_Aug21/Test_Microb/Kraken_Aug21.txt",head=T)
+rownames(kraken.sp)<-kraken.sp$Taxa
+kraken.sp<-kraken.sp[,-1]
+```
+```{r}
+
+###look for variance
+pca.kr.aug21 <- FactoMineR::PCA(t(kraken.sp), scale.unit = T, graph = F, ncp = 20)### scale
+factoextra::fviz_pca_ind(pca.kr.aug21, axes = c(1,2), habillage=as.factor(aug21.df$IMID),geom="point")+ coord_fixed()+ggtitle("PCA Kraken Aug21 ")
+```
+
+```{r}
+##same for P4
+kraken.umis.sel<-kraken.umis[,colnames(kraken.umis) %in% aug18.df$celgIdAll]
+##remove ix0005990, outlier
+kraken.umis.sel<-kraken.umis.sel[,!(colnames(kraken.umis.sel) %in% "ix0005990")]
+
+df<-aug18.df[aug18.df$celgIdAll %in% colnames(kraken.umis.sel),]
+pca.kr.aug18<- FactoMineR::PCA(t(kraken.umis.sel), scale.unit = T, graph = F, ncp = 20)### scale
+factoextra::fviz_pca_ind(pca.kr.aug18, axes = c(1,2), habillage=as.factor(df$imid),geom="point")+ coord_fixed()+ggtitle("PCA Kraken Aug18 ")
+```
+```{r}
+###compare both pcas
+
+common.genes <- intersect(rownames(pca.kr.aug21$var$coord), rownames(pca.kr.aug18$var$coor))
+
+mat <- cor(pca.kr.aug21$var$coord[common.genes,1:10], pca.kr.aug18$var$coor[common.genes,1:10])
+corrplot::corrplot(mat, method = "number", number.cex = 0.7)
+```
+```{r}
+##correlate PCA with technical vars
+
+Glob.df<-as.data.frame(globins.round1)
+colnames(Glob.df)[1]<-"Globin"
+Glob.df$Library.ID<-rownames(Glob.df)
+input.reads<-read.delim("/home/tonig/RNAseq_FASTQ_Aug21/BAM/input_reads.txt",head=F)
+colnames(input.reads)<-c("Library.ID","None","Reads")
+input.reads<-input.reads[,-2]
+####add initial reads and Globin
+aug21.df<-merge(aug21.df,Glob.df,by="Library.ID")
+aug21.df<-merge(aug21.df,input.reads,by="Library.ID")
+
+aug21.df<-aug21.df[match(rownames(pca.kr.aug21$ind$coord),aug21.df$Library.ID),]
+
+#(batch, RIN, depth, plate) i vs biològiques (IMID, sexe, edat, activitat). 
+
+cor.df2 <- cor(pca.kr.aug21$ind$coord[,1:10], aug21.df[,c("Age","Initial.RIN","Initial.DV200","Picogreen..ng.ul.","Reads","Globin")], use = "pairwise.complete.obs")
+corrplot::corrplot(cor.df2, method = "number", tl.cex = 0.7, number.cex = 0.7)
+```
+```{r}
+
+###UC
+#CTRL   HI   LO 
+ # 11    8    5 
+  
+  
+for ( i in 1:length(imids))
+{
+  
+  my.samplesheet<- aug21.df[aug21.df$IMID %in% c(imids[i],"CTRL"),]
+  rownames(my.samplesheet)<-my.samplesheet$Library.ID
+  my.samplesheet$imid<-droplevels(my.samplesheet$IMID)
+  ###in case UC
+#my.samplesheet$activity[my.samplesheet$IMID=="UC"] <- ifelse(my.samplesheet$CU_F_13[my.samplesheet$IMID=="UC"]>4, "HI", "LO")
+##in case CD 
+    my.samplesheet$activity[my.samplesheet$IMID=="CD"] <- ifelse(my.samplesheet$EC_F_02[my.samplesheet$IMID=="CD"]>4, "HI", "LO")
+
+  ###order
+  my.kraken<-kraken.sp[,colnames(kraken.sp) %in% my.samplesheet$Library.ID]
+  
+
+  my.samplesheet$activity<-as.character(my.samplesheet$activity)
+  my.samplesheet$ACT<-ifelse(is.na(my.samplesheet$activity),"CTRL",ifelse(my.samplesheet$activity=="HI","HI","LO"))
+  
+  ###order counts using my.samplesheet
+  
+  my.kraken<-my.kraken[,match(my.samplesheet$Library.ID,colnames(my.kraken))]
+  
+  #Keep only taxa with at least 10 total counts across all samples. This is a good way to improve your power to detect differentially abundant taxa because these low-abundance taxa are less likely to be differentially 
+  #abundant and increase multiple testing.
+  #my.kraken<-my.kraken[rowSums(my.kraken) > 10,]
+  
+  ######remove low taxa
+  minTotRelAbun = 1e-5
+  x <- rowSums(my.kraken)
+  keepTaxa <- which((x / sum(x)) > minTotRelAbun)
+  #####prune for OTU object
+  my.kraken <- my.kraken[rownames(my.kraken) %in% names(keepTaxa),]
+  
+  ####filter too many zeros and only one sample with counts, this impossible with previous one
+  
+  ###first, get taxa with one sample at leats with value more than 100 that its mean
+  
+  ft<-apply(my.kraken,1,function(x){ifelse(any(x> 100*mean(x)),"OUT","KEEP")})
+  
+  
+  ###now, try to find which are the samples that are making problems
+  ###get taxa names
+  taxa.problems<-names(ft[ft=="OUT"])####look specifical 
+  
+  my.s<-unique(colnames(my.kraken[taxa.problems,])[apply(my.kraken[taxa.problems,],1,which.max)])
+  
+  ###remove them
+  
+  my.kraken<-my.kraken[,!(colnames(my.kraken) %in% my.s)]
+  my.samplesheet<-my.samplesheet[my.samplesheet$Library.ID %in% colnames(my.kraken),]
+  
+  my.kraken<-my.kraken[,match(my.samplesheet$Library.ID,colnames(my.kraken))]
+  
+  
+  ### normalization
+  
+  ###actual one
+  
+  #####edgeR robust
+  
+  normFacts <- edgeR:::calcNormFactors(my.kraken, method = "TMM")
+  NFs<-normFacts/exp(mean(log(normFacts)))
+  ##
+  norm.data <- t(t(my.kraken) / NFs)
+  
+  
+  leak<-as.data.frame(colSums(my.kraken)/my.samplesheet$Init_Reads_Aug21)
+
+  leak$Library.ID<-rownames(leak)
+  colnames(leak)[1]<-"Leak_Non_H"
+  
+  my.df<-merge(my.samplesheet[,c("Library.ID","IMID","activity","ACT","Sex","Age","Init_Reads_Aug21")],leak,by="Library.ID")
+  
+  my.df$ACT <- factor(my.df$ACT,levels = c("HI", "LO", "CTRL"))
+  
+  my.df$LEAK_PERC<-my.df$Leak*100
+  
+  ##remove those CTRLs above
+  
+ # my.df2<-my.df[!((my.df$ACT=="CTRL" | my.df$ACT=="LO") & my.df$LEAK_PERC>17),]##Non UMIs
+
+ # non.u.df<-my.df2
+  
+  ###Boxplot
+  ####
+  
+  p <- ggboxplot(my.df, x = "ACT", y = "LEAK_PERC",##change depending on set of genes
+                 color = "ACT",
+                 add = "jitter",
+                 legend="",
+                 outlier.shape = ""
+                # ylim=c(0,60)
+  )
+  
+  p
+  
+  #####manual adjusting
+  
+  linear.hi.lo<-summary(lm(LEAK_PERC ~ as.factor(my.df$ACT) + as.factor(Sex) + Age +log2(Init_Reads_Aug21)
+                           , data = my.df))
+  ###for CTRL comp
+  
+  linear.model.pvals<-summary(lm(LEAK_PERC ~ relevel(as.factor(my.df$ACT),"CTRL") + as.factor(Sex) + Age +log2(Init_Reads_Aug21)
+                                 , data = my.df))
+  
+  #####add linear model pvals instead wilcox
+  stat.test <- compare_means(
+    LEAK_PERC ~ ACT, data = my.df,
+    method = "wilcox.test"
+    
+  )
+  stat.test$p<-c(round(linear.hi.lo$coefficients[2,"Pr(>|t|)"],digits=3),
+                 round(linear.model.pvals$coefficients[2:3,"Pr(>|t|)"],digits=3))###first is always HI vs LO, then CTRLs ccmp
+  
+  ###position in the graph
+  
+  stat.test <- stat.test %>%
+    mutate(y.position = c(max(my.df$LEAK_PERC)+5, max(my.df$LEAK_PERC)+10, max(my.df$LEAK_PERC)+15))
+  
+  
+  p<-p + stat_pvalue_manual(stat.test, label = "p") +ylab("Gut assign. / Non Human Reads (%)")+ ggtitle(paste0("Aug21"),imids[i])
+  print(p)  
+  
+  ###
+}
+
+
+```
+```{r}
+ 
+  #IBD Dysbiosis
+  ##CD and UC
+  ##ratio between F. p and E.coli
+  
+  
+  print("Dysbiosis..")
+  
+  mdi_down <- colSums(norm.data[grep("prausnitzii",rownames(norm.data)), ])
+  #mdi_down<-norm.data[grep("prausnitzii$",rownames(norm.data)), ]
+  mdi_up <- norm.data[grep("Escherichia coli",rownames(norm.data)), ]
+  
+  
+  A<-mdi_up + 1
+  B<-mdi_down + 1
+  
+  Dysbiosis <- log(A/B)###Ratio coli/Faec in CD and UC
+  
+  Dysbiosis<-as.data.frame(Dysbiosis)
+  Dysbiosis$Library.ID<-rownames(Dysbiosis)
+  colnames(Dysbiosis)[1]<-"Dysbiosis"
+  Dysb.df<-merge(my.samplesheet,Dysbiosis,by="Library.ID")
+  Dysb.df$ACT <- factor(Dysb.df$ACT,levels = c("HI", "CTRL", "LO"))
+  
+  
+  Dysb<-Dysb.df[,c("Library.ID","Dysbiosis")]
+  
+  p<- ggboxplot(Dysb.df, x = "ACT", y = "Dysbiosis",##change depending on set of genes
+                color = "ACT",
+                add = "jitter",
+                legend="")
+  
+  
+  
+  p<-p+ ylab("E.coli/ Faec.praus Ratio") + xlab("") + ggtitle(paste0("Dysbiosis ",imids[i], sep=" "))+
+    rotate_x_text(angle = 45)
+  p
+  ###for Hi Lo comp
+  linear.hi.lo<-summary(lm(Dysbiosis ~ as.factor(ACT) + as.factor(Sex) + Age, data = Dysb.df))
+  
+  ###for CTRL comp
+  
+  linear.model.pvals<-summary(lm(Dysbiosis ~ relevel(as.factor(ACT),"CTRL") + as.factor(Sex) + Age , data = Dysb.df))
+  
+  
+  #####add linear model pvals instead wilcox
+  stat.test <- compare_means(
+    Dysbiosis ~ ACT, data = Dysb.df,
+    method = "wilcox.test"
+    
+  )
+  
+  stat.test$p<-c(round(linear.model.pvals$coefficients[2,"Pr(>|t|)"],digits=3),
+                 round(linear.hi.lo$coefficients[3,"Pr(>|t|)"],digits=3),
+                 round(linear.model.pvals$coefficients[3,"Pr(>|t|)"],digits=3))###first is always HI vs LO, then CTRLs ccmp
+  
+  
+  ###position in the graph
+  
+  stat.test <- stat.test %>%
+    mutate(y.position = c(max(Dysb.df$Dysbiosis)+0.5, max(Dysb.df$Dysbiosis)+1, max(Dysb.df$Dysbiosis)+1.5))
+  
+  
+  
+  p<-p + stat_pvalue_manual(stat.test, label = "p")+ ggtitle(paste0("Aug21 Dysbiosis"),imids[i])+
+    rotate_x_text(angle = 45)
+  
+  print(p)
+  
+  dysb.non.umi<-Dysb.df
+```
+Same analysis for Aug18
+
+##UC
+#LO    HI 
+#19 37 18
+```{r}
+
+  my.samplesheet<- aug18.df[aug18.df$imid %in% c(imids[i],"CTRL"),]
+
+####select 11 CTRLs, 8 HI and 5 LO, try to see if we don't get results
+  rownames(my.samplesheet)<-my.samplesheet$celgIdAll
+  my.samplesheet<-my.samplesheet[order(my.samplesheet$activity),]
+  #my.samplesheet<-my.samplesheet[c(1:5,27:38,57:65),]###reduced UC and CD
+  ###order
+  my.kraken<-kraken.umis[,colnames(kraken.umis) %in% my.samplesheet$celgIdAll]
+  
+  
+  my.samplesheet$batch<-as.factor(paste("B",my.samplesheet$new.plate,sep=""))
+  my.samplesheet$activity<-as.character(my.samplesheet$activity)
+  my.samplesheet$activity[my.samplesheet$activity==""] <- NA
+  my.samplesheet$ACT<-ifelse(is.na(my.samplesheet$activity),"CTRL",ifelse(my.samplesheet$activity=="HI","HI","LO"))
+  
+  ###order counts using my.samplesheet
+  
+  my.kraken<-my.kraken[,match(my.samplesheet$celgIdAll,colnames(my.kraken))]
+  
+  #Keep only taxa with at least 10 total counts across all samples. This is a good way to improve your power to detect differentially abundant taxa because these low-abundance taxa are less likely to be differentially 
+  #abundant and increase multiple testing.
+  #my.kraken<-my.kraken[rowSums(my.kraken) > 10,]
+  
+  
+  
+  ######remove low taxa
+  minTotRelAbun = 1e-5
+  x <- rowSums(my.kraken)
+  keepTaxa <- which((x / sum(x)) > minTotRelAbun)
+  #####prune for OTU object
+  my.kraken <- my.kraken[rownames(my.kraken) %in% names(keepTaxa),]
+  
+  ####filter too many zeros and only one sample with counts, this impossible with previous one
+  
+  ###first, get taxa with one sample at leats with value more than 100 that its mean
+  
+  ft<-apply(my.kraken,1,function(x){ifelse(any(x> 100*mean(x)),"OUT","KEEP")})
+  
+  
+  ###now, try to find which are the samples that are making problems
+  ###get taxa names
+  taxa.problems<-names(ft[ft=="OUT"])####look specifical 
+  
+  my.s<-unique(colnames(my.kraken[taxa.problems,])[apply(my.kraken[taxa.problems,],1,which.max)])
+  
+  ###remove them
+  
+  my.kraken<-my.kraken[,!(colnames(my.kraken) %in% my.s)]
+  my.samplesheet<-my.samplesheet[my.samplesheet$celgIdAll %in% colnames(my.kraken),]
+  
+  my.kraken<-my.kraken[,match(my.samplesheet$celgIdAll,colnames(my.kraken))]
+  
+  
+  ### normalization
+  
+  ###actual one
+  
+  #####edgeR robust
+  
+  normFacts <- edgeR:::calcNormFactors(my.kraken, method = "TMM")
+  NFs<-normFacts/exp(mean(log(normFacts)))
+  ##
+  norm.data <- t(t(my.kraken) / NFs)
+  
+  
+  leak<-as.data.frame(colSums(my.kraken)/my.samplesheet$Init_Reads_NON_UMI)
+  
+  leak$celgIdAll<-rownames(leak)
+  colnames(leak)[1]<-"Leak_Non_H"
+  
+  my.df<-merge(my.samplesheet[,c("celgIdAll","imid","activity","ACT","sex","age","new.plate","Init_Reads_NON_UMI")],leak,by="celgIdAll")
+  
+  my.df$ACT<-ifelse(is.na(my.df$activity),"CTRL",ifelse(my.df$activity=="HI","HI","LO"))
+  
+  my.df$ACT <- factor(my.df$ACT,levels = c("HI", "LO", "CTRL"))
+  
+  my.df$LEAK_PERC<-my.df$Leak*100
+  
+  ##remove those CTRLs above
+  
+  #my.df2<-my.df[my.df$celgIdAll %in% non.u.df$celgIdAll,]
+  
+  ###Boxplot
+  ####
+  
+  p <- ggboxplot(my.df, x = "ACT", y = "LEAK_PERC",##change depending on set of genes
+                 color = "ACT",
+                 add = "jitter",
+                 legend="",
+                 outlier.shape = ""  )
+  p
+  
+  
+  #####manual adjusting
+  
+  linear.hi.lo<-summary(lm(LEAK_PERC ~ as.factor(my.df$ACT) + as.factor(sex) + age + as.factor(new.plate)+log2(Init_Reads_NON_UMI)
+                           , data = my.df))
+  ###for CTRL comp
+  
+  linear.model.pvals<-summary(lm(LEAK_PERC ~ relevel(as.factor(my.df$ACT),"CTRL") + as.factor(sex) + age + as.factor(new.plate)
+                                 +log2(Init_Reads_NON_UMI)
+                                 , data = my.df))
+  
+  #####add linear model pvals instead wilcox
+  stat.test <- compare_means(
+    LEAK_PERC ~ ACT, data = my.df,
+    method = "wilcox.test"
+    
+  )
+  stat.test$p<-c(round(linear.hi.lo$coefficients[2,"Pr(>|t|)"],digits=3),
+                 round(linear.model.pvals$coefficients[2:3,"Pr(>|t|)"],digits=3))###first is always HI vs LO, then CTRLs ccmp
+  
+  ###position in the graph
+  
+  stat.test <- stat.test %>%
+    mutate(y.position = c(max(my.df$LEAK_PERC)+2, max(my.df$LEAK_PERC)+5, max(my.df$LEAK_PERC)+8))
+  
+  
+  p<-p + stat_pvalue_manual(stat.test, label = "p") +ylab("Gut assign. / Non Human Reads (%)")+ ggtitle(paste0("Umis Leakage"),imids[i])
+  print(p)  
+  
+```
+Dysbiosis
+```{r}
+ #mdi_down <- colSums(norm.data[grep("prausnitzii",rownames(norm.data)), ])
+ mdi_down <- norm.data[grep("prausnitzii",rownames(norm.data)), ]##umi
+  
+  mdi_up <- norm.data[grep("Escherichia coli",rownames(norm.data)), ]
+  
+  
+  A<-mdi_up + 1
+  B<-mdi_down + 1
+  
+  Dysbiosis <- log(A/B)###Ratio coli/Faec in CD and UC
+  
+  Dysbiosis<-as.data.frame(Dysbiosis)
+  Dysbiosis$celgIdAll<-rownames(Dysbiosis)
+  colnames(Dysbiosis)[1]<-"Dysbiosis"
+  Dysb.df<-merge(my.samplesheet,Dysbiosis,by="celgIdAll")
+  Dysb.df$ACT <- factor(Dysb.df$ACT,levels = c("HI", "CTRL", "LO"))
+  
+  
+  Dysb<-Dysb.df[,c("celgIdAll","Dysbiosis")]
+  
+  #Dysb.df<-Dysb.df[Dysb.df$celgIdAll %n% dysb.non.umi$celgIdAll,]
+  
+  p<- ggboxplot(Dysb.df, x = "ACT", y = "Dysbiosis",##change depending on set of genes
+                color = "ACT",
+                add = "jitter",
+                legend="")
+  
+  
+  
+  p<-p+ ylab("E.coli/ Faec.praus Ratio") + xlab("") + ggtitle(paste0("Dysbiosis ",imids[i], sep=" "))+
+    rotate_x_text(angle = 45)
+  
+  ###for Hi Lo comp
+  linear.hi.lo<-summary(lm(Dysbiosis ~ as.factor(ACT) + as.factor(sex) + age + as.factor(new.plate), data = Dysb.df))
+  
+  ###for CTRL comp
+  
+  linear.model.pvals<-summary(lm(Dysbiosis ~ relevel(as.factor(ACT),"CTRL") + as.factor(sex) + age + as.factor(new.plate), data = Dysb.df))
+  
+  
+  #####add linear model pvals instead wilcox
+  stat.test <- compare_means(
+    Dysbiosis ~ ACT, data = Dysb.df,
+    method = "wilcox.test"
+    
+  )
+  
+  stat.test$p<-c(round(linear.model.pvals$coefficients[2,"Pr(>|t|)"],digits=3),
+                 round(linear.hi.lo$coefficients[3,"Pr(>|t|)"],digits=3),
+                 round(linear.model.pvals$coefficients[3,"Pr(>|t|)"],digits=3))###first is always HI vs LO, then CTRLs ccmp
+  
+  
+  ###position in the graph
+  
+  stat.test <- stat.test %>%
+    mutate(y.position = c(max(Dysb.df$Dysbiosis)+0.5, max(Dysb.df$Dysbiosis)+1, max(Dysb.df$Dysbiosis)+1.5))
+  
+  
+  
+  p<-p + stat_pvalue_manual(stat.test, label = "p")+ ggtitle(paste0("Umis Dysbiosis"),imids[i])+
+    rotate_x_text(angle = 45)
+  
+  print(p)
+```

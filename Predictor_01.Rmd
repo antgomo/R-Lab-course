@@ -1,0 +1,225 @@
+---
+title: "Monocytes Methylation Predictor LOOCV"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Build a methylation predictor considering Monocyte cell type
+##Load data
+
+```{r}
+setwd("/home/tonig/media/Projects/Internal_Projects/2019_GRR_FISMethAnalysis/Paper_Material/CellType_Analysis/")
+###
+###samplesheets_p6_notinFIS.csv
+ann850k<-getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+ann850k<-as.data.frame(ann850k)
+
+###data
+load("~/media/Projects/Internal_Projects/2019_GRR_FISMethAnalysis/FIS_P6/FIS_P6_FINAL.RData")
+
+####samplesheet
+
+targets<-read.csv("~/media/Projects/Internal_Projects/2019_GRR_FISMethAnalysis/FIS_P6/Final_FIS_P6_samples.csv")
+load("/home/tonig/FIS_Meth/DAS28_BD.RData")
+
+pheno_das28<-df
+colnames(pheno_das28)[1]<-"Code"
+
+####check days from wk0 to second point
+pheno_extended<-readRDS("/media/IMID/Data/Storage/Clinical/2012_INNPACTO_IB/03_Preprocessed/clinicalData_v1.rds")
+pheno_extended<-pheno_extended[,c("idCaso","AR_S0_E_0106","AR_S0_E_0104","AR_S0_E_0105")]
+colnames(pheno_extended)<-c("Code","EULAR","Point_after_wk0","DAys_to_2nd_point")
+
+
+pheno_das28<-merge(pheno_das28,pheno_extended,by="Code")
+
+samples2rem<-pheno_das28[pheno_das28$DAS28.S0<3.2,"Code"]### samples IB-30107, IB-30127,IB-30141 and IB-30406
+##only betas in blood target
+
+targets<-targets[targets$Assay=="FIS",]
+
+####remove samples in baseline with DAS28<3.2
+samples2rem<-pheno_das28[pheno_das28$DAS28.S0<3.2,"Code"]### samples IB-30107, IB-30127,IB-30141 and IB-30406
+targets<-targets[!(targets$Code %in% samples2rem),]
+
+betas<-getBeta(countsEPIC$normalizedData)
+
+pD.w0<-targets[targets$week=="wk0",]
+##remove sexual chromosomes and SNPs probes
+
+betas<-rmSNPandCH(betas, dist = 2, mafcut = 0.05, and = TRUE, rmcrosshyb = TRUE, rmXY=TRUE)
+
+####Comparisons
+
+#R0 vs NR0 
+
+library(limma)
+
+##simple limma approach, build design matrix with Cell composition
+
+
+betas.fis<-betas[,colnames(betas) %in% pD.w0$xipName]
+betas.fis<-betas.fis[,match(as.character(pD.w0$xipName),colnames(betas.fis))]#w0
+pD.w0$SEX<-droplevels(as.factor(pD.w0$SEX))
+
+##
+cell_comp<-countsEPIC$counts
+cc.df<-cell_comp[rownames(cell_comp) %in% colnames(betas.fis),]
+cc.df<-cc.df[match(colnames(betas.fis),rownames(cc.df)),]
+
+gc()
+```
+
+##LOOCV
+```{r cars}
+library(randomForest)
+library()
+cv<-as.list(1:NROW(x))##x is samples length
+
+loocv_probs.bal<-function(data_to_classify, cancer_to_classify, cv, filter_var=0.05, nb_cores=2, n_top=10, pheno2pred){
+  
+  cl=makeCluster(as.numeric(nb_cores), outfile="")
+  registerDoParallel(cl) 
+  
+  results<-foreach(fold=cv, .packages="randomForest") %dopar% {
+    
+    testData=data_to_classify[fold,,drop=F]
+    cancerTest=cancer_to_classify[fold]
+    
+    trainData=data_to_classify[-c(fold),,drop=F]
+    cancerTrain=as.factor(as.character(cancer_to_classify[-c(fold)]))
+
+
+    
+    # normalization
+    data_means = colMeans(trainfiltered)
+    data_sd    = apply(trainfiltered, 2, sd)
+    trainData=scale(trainfiltered, center = T,scale = T)
+    testData=scale(testfiltered, center = data_means,scale = data_sd)
+    
+    # randomForest + return
+    model=randomForest(trainData, cancerTrain, importance=T, do.trace=F, probs=T, strata=cancerTrain, sampsize=rep(min(table(cancerTrain)),2))
+    #top=rownames(model$importance[order(model$importance[,(length(levels(cancerTrain))+1)],decreasing = T),,drop=F])[1:n_top]
+    list(proba=predict(model,testData,type="prob"))#top_genes=top
+  }
+  
+  stopCluster(cl)
+  
+  # Merge folds results
+  probabilities=foreach(fold.result=results, fold.num=icount(), .combine=rbind) %do%{as.data.frame(fold.result$proba)}
+  return(probabilities[,pheno2pred])
+}
+
+
+
+```
+##Using GLM
+treu 1 ind X (testing set)
+mateix num R vs NR (training set)
+indentif features predictives en training (cpg assoc en Mac): status ~ methyl*cellF + covars
+muntes el model (tenint en compte interacció): glm ~ cpg1*percM + cpg2*percM + … + covars
+predius el indiv X, dona probabilitat de ser R (o NR)
+confusion matrix
+
+```{r}
+
+data <- t(betas.fis)
+acc <- NULL
+
+for(i in 1:nrow(data))
+{
+  # Train-test splitting
+  # 61 samples -> fitting
+  # 1 sample -> testing
+  train <- data[,-i]
+  test <- data[,i]
+  
+  ###first assure that you have set to minimum group
+  feno<-pD.w0
+  ##get test label 
+  test.label<-feno[feno$xipName %in% rownames(data)[i],"RESP"]
+    #substract sample to test
+
+  feno<-feno[!(feno$xipName %in% rownames(data)[i]),]
+  
+  ####
+  ###then identify features using same model on data for this particular iteration
+  ###DMP analysis
+  df<-as.data.frame(t(train))
+  mono.perc<-cc.df[rownames(cc.df) %in% colnames(df),"Mono"]
+  ####agafar CpG top per CellDMC i veure si surt aquest model
+  design <- model.matrix(~ mono.perc + as.factor(feno$RESP):mono.perc+ feno$SEX +feno$Age)[, -1]
+  colnames(design)[4]<-"Comp"
+  fit <- lmFit(df, design)
+
+  # fit the contrasts
+  fit2 <- eBayes(fit)
+  results<-topTable(fit2,coef="Comp",n= dim(fit2)[1],adjust.method = "fdr", sort.by="P")
+  feat<-rownames(results[results$adj.P.Val<.05,])
+  ######
+  ##implementar balanceig
+  
+  # Fitting model with selected features
+  tr.df<-as.data.frame(train[,colnames(train) %in% feat])
+  ~.### agfa totes
+  ####do i have to do one by one?
+  model1 <- glm(mono.perc ~. RESP:mono.perc+SEX+Age,data=tr.df)###construir matriu amb totes les variables, afegir 
+  
+  ###
+  
+  pred_glm <- stats::predict(model,as.data.frame(test),type='response')
+  
+  # If prob > 0.8 then 1, else 0
+  results <- ifelse(pred_glm > 0.8,"BLUE","BLACK")
+  
+  # Actual answers
+  answers <- test$label
+  
+  # Calculate accuracy
+  misClasificError <- mean(answers != results)
+  
+  # Collecting results
+  acc[i] <- 1-misClasificError
+  
+  
+}
+
+# Average accuracy of the model
+
+mean(acc)
+
+
+
+for (i in 1:10){
+
+    set.seed(i)
+
+    train = Default %>%
+      sample_frac(0.2)
+
+    test = Default %>%
+      setdiff(train)
+
+    # Fit a logistic regression to predict default using balance
+    model_LOGISTIC = glm(default~balance+student, data=train, family=binomial)
+
+    # Use the model to predict the response on the test data
+    glm_probs = data.frame(probs = predict(model_LOGISTIC, newdata=test, type="response"))
+
+    # Confusion matrix
+    glm_pred = glm_probs %>%
+      mutate(pred = ifelse(probs>.5, "Yes", "No"))
+
+    glm_pred = cbind(test, glm_pred)
+
+    result = glm_pred %>%
+      summarize(score = mean(pred == default))
+    
+    print(result)
+}
+
+```
+
